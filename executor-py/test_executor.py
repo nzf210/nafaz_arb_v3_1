@@ -70,6 +70,9 @@ class MockExchange:
         self.cancelled.append((order_id, symbol))
         return {"id": order_id, "status": "canceled"}
 
+    def fetch_balance(self):
+        return {"free": {"USDT": 1_000_000.0}, "total": {"USDT": 1_000_000.0}}
+
     def fetch_positions(self, symbols=None):
         return self.positions
 
