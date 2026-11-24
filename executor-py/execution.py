@@ -22,8 +22,8 @@ def round_price(price: float, tick_size: float, side: str = "buy") -> float:
     if tick_size <= 0:
         raise ValueError("tick_size must be > 0")
     p, t = _to_dec(price), _to_dec(tick_size)
-    _ = side
-    units = (p / t).to_integral_value(rounding=ROUND_DOWN)
+    rounding = ROUND_CEILING if side.lower() == "sell" else ROUND_DOWN
+    units = (p / t).to_integral_value(rounding=rounding)
     return float(units * t)
 
 
@@ -160,25 +160,28 @@ class DeltaNeutralExecutor:
                     status = str(fetched.get("status") or status).lower()
             except Exception as exc:
                 logger.warning("fetch_order fallback failed for %s (%s): %s", order_id, symbol, exc)
-        filled_amt = float(filled_raw) if filled_raw is not None else req_order_amt
-        return float(_to_dec(filled_amt) * _to_dec(ct_size)), (status or "closed")
+        # Unknown fill state is never interpreted as a full fill; reconcile before hedging.
+        filled_amt = float(filled_raw) if filled_raw is not None else 0.0
+        return float(_to_dec(filled_amt) * _to_dec(ct_size)), (status or "unknown")
 
     def check_sufficient_balance(self, exchange: str, required_usdt: float) -> bool:
         """Verify exchange has enough free USDT balance when fetch_balance is available."""
         client = self.exchanges.get(exchange)
         if not client or not hasattr(client, "fetch_balance"):
-            return True
+            logger.error("Cannot verify free USDT balance on %s; rejecting live execution", exchange)
+            return False
         try:
             bal = client.fetch_balance()
             free_usdt = bal.get("free", {}).get("USDT")
             if free_usdt is None:
                 free_usdt = bal.get("USDT", {}).get("free")
             if free_usdt is None:
-                return True
+                logger.error("Free USDT balance missing on %s; rejecting live execution", exchange)
+                return False
             return float(free_usdt) >= required_usdt
         except Exception as exc:
             logger.warning("Failed to check balance on %s: %s", exchange, exc)
-            return True
+            return False
 
     def _place_leg_a(
         self, ex_a: str, client_a: Any, sym_a: str, side_a: str, qty: float, price_a: float
@@ -370,14 +373,58 @@ class DeltaNeutralExecutor:
         if PERP_SUFFIX in symbol:
             try:
                 return client.create_order(symbol, "market", close_side, ord_amt, None, {"reduceOnly": True})
-            except TypeError:
-                return client.create_order(symbol, "market", close_side, ord_amt, None)
+            except TypeError as exc:
+                raise RuntimeError(
+                    f"{exchange} client rejected reduceOnly; refusing an unsafe non-reduce-only close"
+                ) from exc
         if close_side == "buy" and ref_price is not None and ref_price > 0:
             return client.create_order(symbol, "market", close_side, ord_amt, ref_price)
         return client.create_order(symbol, "market", close_side, ord_amt, None)
 
+    def _perpetual_position_is_flat(self, client: Any, symbol: str) -> bool:
+        if not hasattr(client, "fetch_positions"):
+            return False
+        positions = client.fetch_positions([symbol])
+        if not isinstance(positions, list):
+            return False
+        for position in positions:
+            info = position.get("info") or {}
+            position_symbol = position.get("symbol") or info.get("symbol")
+            if position_symbol != symbol:
+                continue
+            contracts = position.get("contracts")
+            if contracts is None:
+                contracts = position.get("amount", 0.0)
+            contract_size = position.get("contractSize")
+            if contract_size is None and getattr(client, "markets", None):
+                contract_size = (client.markets.get(symbol) or {}).get("contractSize")
+            base_qty = abs(float(contracts or 0.0) * float(contract_size or 1.0))
+            if base_qty > 1e-10:
+                return False
+        return True
+
+    def _close_leg_and_verify(
+        self,
+        exchange: str,
+        client: Any,
+        symbol: str,
+        close_side: str,
+        base_qty: float,
+        ref_price: Optional[float],
+    ) -> tuple[Optional[Dict[str, Any]], bool, str]:
+        order = self._create_close_order(exchange, client, symbol, close_side, base_qty, ref_price)
+        order_amount, contract_size = self._to_order_amount(exchange, symbol, base_qty)
+        filled_base, order_status = self._resolve_filled_base(
+            client, symbol, order, order_amount, contract_size
+        )
+        if filled_base + 1e-10 < base_qty:
+            return order, False, f"close_fill_incomplete:{filled_base}/{base_qty}"
+        if PERP_SUFFIX in symbol and not self._perpetual_position_is_flat(client, symbol):
+            return order, False, "exchange_position_not_flat"
+        return order, True, order_status
+
     def unwind_route(self, position: Dict[str, Any], dry_run: bool = False) -> Dict[str, Any]:
-        """Close both legs of an active 1:1 route via market orders."""
+        """Close both legs and report success only after close fills are verified."""
         leg_a = position["leg_a"]
         leg_b = position["leg_b"]
         qty = float(position["qty"])
@@ -401,16 +448,34 @@ class DeltaNeutralExecutor:
         client_b = self.exchanges[leg_b["exchange"]]
         ref_a = float(leg_a.get("price") or leg_a.get("vwap_price") or 0.0) or None
         ref_b = float(leg_b.get("price") or leg_b.get("vwap_price") or 0.0) or None
-        ord_a = self._create_close_order(leg_a["exchange"], client_a, sym_a, close_side_a, qty, ref_a)
-        ord_b = self._create_close_order(leg_b["exchange"], client_b, sym_b, close_side_b, qty, ref_b)
+        try:
+            order_a, verified_a, detail_a = self._close_leg_and_verify(
+                leg_a["exchange"], client_a, sym_a, close_side_a, qty, ref_a
+            )
+        except Exception as exc:
+            order_a, verified_a, detail_a = None, False, f"close_error:{exc}"
+        try:
+            order_b, verified_b, detail_b = self._close_leg_and_verify(
+                leg_b["exchange"], client_b, sym_b, close_side_b, qty, ref_b
+            )
+        except Exception as exc:
+            order_b, verified_b, detail_b = None, False, f"close_error:{exc}"
+        verified = verified_a and verified_b
+        status = "UNWOUND_VERIFIED" if verified else "UNWIND_PENDING"
         if self.notifier:
-            self.notifier(f"[UNWIND] Closed route {position.get('base_asset', '')} qty={qty}")
+            level = "UNWIND VERIFIED" if verified else "UNWIND RECONCILIATION REQUIRED"
+            self.notifier(f"[{level}] {position.get('base_asset', '')} qty={qty}")
         return {
-            "status": "UNWOUND_1TO1",
+            "status": status,
             "base_asset": position.get("base_asset"),
             "qty": qty,
-            "order_a": ord_a,
-            "order_b": ord_b,
+            "order_a": order_a,
+            "order_b": order_b,
+            "verified_flat": verified,
+            "leg_a_verified": verified_a,
+            "leg_b_verified": verified_b,
+            "leg_a_detail": detail_a,
+            "leg_b_detail": detail_b,
         }
 
     close_route = unwind_route

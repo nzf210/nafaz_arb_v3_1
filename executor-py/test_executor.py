@@ -46,7 +46,7 @@ class MockExchange:
         self.positions = []
         self.margin_ratio = 0.25
 
-    def create_order(self, symbol: str, order_type: str, side: str, amount: float, price=None):
+    def create_order(self, symbol: str, order_type: str, side: str, amount: float, price=None, params=None):
         if self.fail_create:
             raise RuntimeError(f"{self.name} create_order timeout/failure")
         # Market unwind orders always fill 100%
@@ -69,6 +69,9 @@ class MockExchange:
     def cancel_order(self, order_id: str, symbol: str | None = None):
         self.cancelled.append((order_id, symbol))
         return {"id": order_id, "status": "canceled"}
+
+    def fetch_balance(self):
+        return {"free": {"USDT": 1_000_000.0}, "total": {"USDT": 1_000_000.0}}
 
     def fetch_positions(self, symbols=None):
         return self.positions
@@ -264,7 +267,8 @@ def test_unwind_route_closes_both_legs():
         "leg_b": {"exchange": "bybit", "symbol": "BTC/USDT:USDT", "side": "sell"},
     }
     res = executor.unwind_route(position)
-    assert res["status"] == "UNWOUND_1TO1"
+    assert res["status"] == "UNWOUND_VERIFIED"
+    assert res["verified_flat"] is True
     assert ex_okx.orders[0]["side"] == "sell"
     assert ex_bybit.orders[0]["side"] == "buy"
 
@@ -324,7 +328,8 @@ def test_watchdog_reconciliation_margin_and_adl():
     unwound = watchdog.check_adl_indicators(adl_positions)
     assert len(unwound) == 1
     assert unwound[0]["adl_rank"] == 4
-    assert unwound[0]["unwind"]["status"] == "UNWOUND_1TO1"
+    assert unwound[0]["unwind"]["status"] == "UNWIND_PENDING"
+    assert redis.get("core:kill_switch") == "true"
     assert any("[ADL WARNING]" in m for m in notifier.outbox)
 
 
@@ -455,7 +460,9 @@ def test_live_balance_check_ccxt_margin_adl_and_preflight():
     unwound = watchdog.check_adl_indicators()
     assert len(unwound) == 1
     assert unwound[0]["adl_rank"] == 4
-    assert json.loads(redis.get("core:positions")) == []
+    remaining_positions = json.loads(redis.get("core:positions"))
+    assert len(remaining_positions) == 1
+    assert remaining_positions[0]["base_asset"] == "BTC"
 
     # Auto-exit when funding spread flips negative (including perp-perp interval mismatch)
     ex_okx.fetch_funding_rate = lambda sym: {"fundingRate": 0.0002}
@@ -484,3 +491,86 @@ def test_live_balance_check_ccxt_margin_adl_and_preflight():
     redis.ping = lambda: True
     assert run_preflight(redis, None, dry_run=True) is True
 
+
+
+def test_round_price_respects_order_side():
+    assert round_price(100.01, 0.1, "buy") == pytest.approx(100.0)
+    assert round_price(100.01, 0.1, "sell") == pytest.approx(100.1)
+
+
+def test_live_balance_check_fails_closed_when_unverifiable():
+    executor_without_client = DeltaNeutralExecutor({})
+    assert executor_without_client.check_sufficient_balance("missing", 10.0) is False
+
+    class MissingBalance:
+        def fetch_balance(self):
+            return {"free": {}, "USDT": {}}
+
+    class FailingBalance:
+        def fetch_balance(self):
+            raise RuntimeError("temporary exchange outage")
+
+    executor = DeltaNeutralExecutor({"missing_data": MissingBalance(), "offline": FailingBalance()})
+    assert executor.check_sufficient_balance("missing_data", 10.0) is False
+    assert executor.check_sufficient_balance("offline", 10.0) is False
+
+
+def test_perpetual_close_refuses_non_reduce_only_fallback():
+    class RejectReduceOnly:
+        def create_order(self, symbol, order_type, side, amount, price=None, params=None):
+            if params and params.get("reduceOnly") is True:
+                raise TypeError("reduceOnly unsupported")
+            pytest.fail("unsafe close without reduceOnly must never be submitted")
+
+    executor = DeltaNeutralExecutor({"okx": RejectReduceOnly()})
+    with pytest.raises(RuntimeError, match="refusing an unsafe non-reduce-only close"):
+        executor._create_close_order("okx", executor.exchanges["okx"], "BTC/USDT:USDT", "sell", 0.01)
+
+
+def test_unknown_order_fill_is_not_assumed_to_be_fully_filled():
+    class UnknownOrder:
+        def fetch_order(self, order_id, symbol):
+            raise RuntimeError("order endpoint unavailable")
+
+    executor = DeltaNeutralExecutor({})
+    filled, status = executor._resolve_filled_base(
+        UnknownOrder(),
+        "BTC/USDT:USDT",
+        {"id": "order-unknown", "filled": None, "status": None},
+        0.02,
+        1.0,
+    )
+    assert filled == 0.0
+    assert status == "unknown"
+
+
+def test_unwind_remains_pending_when_close_orders_are_partially_filled():
+    class PartialCloseExchange(MockExchange):
+        def create_order(self, symbol, order_type, side, amount, price=None, params=None):
+            order = {
+                "id": f"{self.name}_partial_close",
+                "symbol": symbol,
+                "type": order_type,
+                "side": side,
+                "amount": amount,
+                "filled": amount * 0.5,
+                "price": price,
+                "status": "open",
+            }
+            self.orders.append(order)
+            return order
+
+    ex_a = PartialCloseExchange("okx")
+    ex_b = PartialCloseExchange("bybit")
+    executor = DeltaNeutralExecutor({"okx": ex_a, "bybit": ex_b})
+    position = {
+        "base_asset": "BTC",
+        "qty": 0.05,
+        "leg_a": {"exchange": "okx", "symbol": "BTC/USDT:USDT", "side": "buy"},
+        "leg_b": {"exchange": "bybit", "symbol": "BTC/USDT:USDT", "side": "sell"},
+    }
+    result = executor.unwind_route(position)
+    assert result["status"] == "UNWIND_PENDING"
+    assert result["verified_flat"] is False
+    assert result["leg_a_verified"] is False
+    assert result["leg_b_verified"] is False

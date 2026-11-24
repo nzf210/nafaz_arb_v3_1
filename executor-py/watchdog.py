@@ -222,6 +222,27 @@ class RiskWatchdog:
                 statuses[ex_name] = "OK"
         return statuses
 
+    def _execute_unwind_and_finalize(self, position: Dict[str, Any], trigger: str) -> Dict[str, Any]:
+        base_asset = position.get("base_asset", "UNKNOWN")
+        if self.unwind_callback is None:
+            return {"status": "UNWIND_RECOMMENDED"}
+        try:
+            result = self.unwind_callback(position)
+        except Exception as exc:
+            result = {"status": "UNWIND_PENDING", "error": str(exc)}
+        verified = (
+            isinstance(result, dict)
+            and result.get("status") == "UNWOUND_VERIFIED"
+            and result.get("verified_flat") is True
+        )
+        if verified:
+            self.mark_position_closed(base_asset)
+            return result
+        details = {"base_asset": base_asset, "trigger": trigger, "unwind_result": result}
+        self._record_risk("UNWIND_UNVERIFIED", "CRITICAL", details)
+        self.activate_kill_switch(f"{trigger} unwind not verified for {base_asset}")
+        return result
+
     def check_adl_indicators(self, positions: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         """
         Check ADL indicator light (1..5). If adl_rank >= adl_threshold (4),
@@ -240,9 +261,7 @@ class RiskWatchdog:
                 f"[ADL WARNING] {base_asset} ADL rank={max_adl}/5 >= {self.adl_threshold}; triggering early unwind"
             )
             self._record_risk("ADL_HIGH_RISK", "WARNING", {"base_asset": base_asset, "adl_rank": max_adl})
-            unwind_res = self.unwind_callback(pos) if self.unwind_callback else {"status": "EARLY_UNWIND_RECOMMENDED"}
-            if self.unwind_callback:
-                self.mark_position_closed(base_asset)
+            unwind_res = self._execute_unwind_and_finalize(pos, "ADL")
             unwound.append({"base_asset": base_asset, "adl_rank": max_adl, "unwind": unwind_res})
         return unwound
 
@@ -321,9 +340,7 @@ class RiskWatchdog:
             base_asset = pos.get("base_asset", "UNKNOWN")
             self.notifier.send(f"[EXIT] Closing {base_asset}: {reason}")
             self._record_risk("AUTO_EXIT", "INFO", {"base_asset": base_asset, "reason": reason})
-            unwind_res = self.unwind_callback(pos) if self.unwind_callback else {"status": "EXIT_RECOMMENDED"}
-            if self.unwind_callback:
-                self.mark_position_closed(base_asset)
+            unwind_res = self._execute_unwind_and_finalize(pos, "AUTO_EXIT")
             exited.append({"base_asset": base_asset, "reason": reason, "unwind": unwind_res})
         return exited
 
