@@ -160,7 +160,8 @@ class DeltaNeutralExecutor:
                     status = str(fetched.get("status") or status).lower()
             except Exception as exc:
                 logger.warning("fetch_order fallback failed for %s (%s): %s", order_id, symbol, exc)
-        filled_amt = float(filled_raw) if filled_raw is not None else req_order_amt
+        # Unknown fill state is never interpreted as a full fill; reconcile before hedging.
+        filled_amt = float(filled_raw) if filled_raw is not None else 0.0
         return float(_to_dec(filled_amt) * _to_dec(ct_size)), (status or "closed")
 
     def check_sufficient_balance(self, exchange: str, required_usdt: float) -> bool:
