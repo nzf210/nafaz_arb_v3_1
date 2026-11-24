@@ -32,10 +32,12 @@ class TelegramNotifier:
     def send(self, message: str) -> bool:
         self.outbox.append(message)
         logger.info("Telegram alert: %s", message)
-        if self.dry_run or not self.bot_token or not self.chat_id:
+        if not self.bot_token or not self.chat_id:
             return True
+        prefix = "[SIMULASI] " if self.dry_run and not message.startswith("[") else ""
+        text = f"{prefix}{message}"
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-        payload = json.dumps({"chat_id": self.chat_id, "text": message}).encode("utf-8")
+        payload = json.dumps({"chat_id": self.chat_id, "text": text}).encode("utf-8")
         req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=5) as resp:
@@ -73,6 +75,11 @@ class RiskWatchdog:
     def _record_risk(self, event_type: str, severity: str, details: Dict[str, Any]) -> None:
         if self.db_store is not None and hasattr(self.db_store, "record_risk_event"):
             self.db_store.record_risk_event(event_type, severity, details)
+        if hasattr(self.notifier, "notify_risk_alert"):
+            try:
+                self.notifier.notify_risk_alert(event_type, severity, details)
+            except Exception as exc:
+                logger.warning("Telegram notify_risk_alert failed: %s", exc)
 
     def activate_kill_switch(self, reason: str) -> None:
         self.redis.set("core:kill_switch", "true")
@@ -237,6 +244,11 @@ class RiskWatchdog:
         )
         if verified:
             self.mark_position_closed(base_asset)
+            if hasattr(self.notifier, "notify_position_closed"):
+                try:
+                    self.notifier.notify_position_closed(result, base_asset)
+                except Exception as exc:
+                    logger.warning("Telegram notify_position_closed failed: %s", exc)
             return result
         details = {"base_asset": base_asset, "trigger": trigger, "unwind_result": result}
         self._record_risk("UNWIND_UNVERIFIED", "CRITICAL", details)

@@ -12,6 +12,7 @@ import redis
 from consumer import SignalConsumer
 from db import PostgresStore
 from execution import DeltaNeutralExecutor
+from telegram_bot import TelegramBot
 from watchdog import RiskWatchdog, TelegramNotifier
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -105,6 +106,13 @@ def run_preflight(redis_client: Any, db_store: Optional[PostgresStore], dry_run:
         if not has_any_key:
             logger.error("[PREFLIGHT] Live mode (DRY_RUN=false) requires at least one CEX API key set")
             ok = False
+
+    tg_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    tg_chat = os.getenv("TELEGRAM_CHAT_ID", "")
+    if tg_token and tg_chat:
+        logger.info("[PREFLIGHT] Telegram configuration: OK (target chat: %s)", tg_chat)
+    else:
+        logger.warning("[PREFLIGHT] Telegram bot token or chat ID not set; alerts will stay local")
     return ok
 
 
@@ -133,22 +141,33 @@ def main(argv: Optional[list[str]] = None) -> None:
         )
 
     exchanges = {} if dry_run else build_ccxt_exchanges(load_markets=True)
-    notifier = TelegramNotifier(dry_run=dry_run)
-    executor = DeltaNeutralExecutor(exchanges=exchanges, notifier=notifier.send)
+    tg_bot = TelegramBot(
+        dry_run=dry_run,
+        redis_client=redis_client,
+        db_store=db_store,
+        exchanges=exchanges,
+        canary_cap=canary_cap or 20.0,
+    )
+    executor = DeltaNeutralExecutor(exchanges=exchanges, notifier=tg_bot.send)
     consumer = SignalConsumer(
         redis_client=redis_client,
         executor=executor,
         default_dry_run=dry_run,
         canary_max_notional_usdt=canary_cap,
         db_store=db_store,
+        notifier=tg_bot,
     )
     watchdog = RiskWatchdog(
         redis_client=redis_client,
         exchanges=exchanges,
-        notifier=notifier,
+        notifier=tg_bot,
         unwind_callback=lambda pos: executor.unwind_route(pos, dry_run=dry_run),
         db_store=db_store,
     )
+    tg_bot.executor = executor
+    tg_bot.consumer = consumer
+    tg_bot.watchdog = watchdog
+    tg_bot.start()
 
     pubsub = redis_client.pubsub(ignore_subscribe_messages=True)
     pubsub.subscribe("core:signals")

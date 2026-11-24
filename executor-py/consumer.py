@@ -62,10 +62,12 @@ class SignalConsumer:
         lock_ttl_sec: int = 10,
         clock_ms: Optional[Callable[[], int]] = None,
         db_store: Optional[Any] = None,
+        notifier: Optional[Any] = None,
     ):
         self.redis = redis_client
         self.executor = executor
         self.db_store = db_store
+        self.notifier = notifier
         # ponytail: in-memory profile dict; refreshes from Postgres runtime_settings when db_store is injected
         self.profiles = profiles or {
             "funding_carry_core": {"enabled": True},
@@ -209,6 +211,11 @@ class SignalConsumer:
             "DRY_RUN_Simulated",
         ) and qty > 0:
             self._upsert_redis_position(signal, result, qty)
+            if self.notifier and hasattr(self.notifier, "notify_position_opened"):
+                try:
+                    self.notifier.notify_position_opened(signal, result)
+                except Exception as exc:
+                    logger.warning("Telegram notify_position_opened failed: %s", exc)
         if self.db_store is None:
             return
         if hasattr(self.db_store, "record_signal_outcome"):

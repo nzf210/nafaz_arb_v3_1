@@ -217,3 +217,106 @@ class PostgresStore:
                 "INSERT INTO risk_events (event_type, severity, details) VALUES (%s, %s, %s)",
                 (event_type, severity, json.dumps(details)),
             )
+
+    def list_recent_executions(self, limit: int = 10) -> List[Dict[str, Any]]:
+        conn = self._get_conn()
+        if conn is None:
+            return []
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, signal_id, profile_id, base_asset, status, dry_run,
+                       qty, effective_notional_usdt, leg_a, leg_b, created_at
+                FROM trade_executions
+                ORDER BY id DESC LIMIT %s
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+            return [
+                {
+                    "id": r[0],
+                    "signal_id": r[1],
+                    "profile_id": r[2],
+                    "base_asset": r[3],
+                    "status": r[4],
+                    "dry_run": r[5],
+                    "qty": float(r[6]),
+                    "effective_notional_usdt": float(r[7]),
+                    "leg_a": json.loads(r[8]) if isinstance(r[8], str) else r[8],
+                    "leg_b": json.loads(r[9]) if isinstance(r[9], str) else r[9],
+                    "created_at": str(r[10]),
+                }
+                for r in rows
+            ]
+
+    def list_recent_signals(self, limit: int = 10) -> List[Dict[str, Any]]:
+        conn = self._get_conn()
+        if conn is None:
+            return []
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT signal_id, profile_id, route_type, base_asset,
+                       target_notional_usdt, status, reason, created_at
+                FROM signal_audit
+                ORDER BY created_at DESC LIMIT %s
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+            return [
+                {
+                    "signal_id": r[0],
+                    "profile_id": r[1],
+                    "route_type": r[2],
+                    "base_asset": r[3],
+                    "target_notional_usdt": float(r[4]),
+                    "status": r[5],
+                    "reason": r[6],
+                    "created_at": str(r[7]),
+                }
+                for r in rows
+            ]
+
+    def list_recent_risk_events(self, limit: int = 10) -> List[Dict[str, Any]]:
+        conn = self._get_conn()
+        if conn is None:
+            return []
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, event_type, severity, details, created_at FROM risk_events ORDER BY id DESC LIMIT %s",
+                (limit,),
+            )
+            rows = cur.fetchall()
+            return [
+                {
+                    "id": r[0],
+                    "event_type": r[1],
+                    "severity": r[2],
+                    "details": json.loads(r[3]) if isinstance(r[3], str) else r[3],
+                    "created_at": str(r[4]),
+                }
+                for r in rows
+            ]
+
+    def update_profile_setting(self, profile_id: str, field: str, value: Any) -> bool:
+        allowed = {
+            "enabled": bool,
+            "dry_run": bool,
+            "canary_max_notional_usdt": float,
+            "max_notional_usdt": float,
+        }
+        if field not in allowed:
+            return False
+        conn = self._get_conn()
+        if conn is None:
+            return False
+        val = allowed[field](value)
+        with conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE runtime_settings SET {field} = %s, updated_at = NOW() WHERE profile_id = %s",
+                (val, profile_id),
+            )
+            return cur.rowcount > 0
+
