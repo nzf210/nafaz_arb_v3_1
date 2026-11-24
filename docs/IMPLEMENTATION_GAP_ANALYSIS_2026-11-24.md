@@ -53,6 +53,9 @@ The repository default branch `main` contained only `LICENSE` at audit time. The
 - Unknown fill amount: no longer assumed to equal the requested order quantity.
 - Unknown order status: preserved as `unknown`, not silently labeled `closed`.
 - Perpetual close: no longer retries without `reduceOnly` if the client rejects that parameter.
+- Route unwind now attempts both legs independently, checks close fill quantities, and verifies perpetual positions are flat before returning `UNWOUND_VERIFIED`; otherwise it returns `UNWIND_PENDING` with per-leg diagnostics.
+- Watchdog only marks a position closed after an explicit `UNWOUND_VERIFIED` plus `verified_flat=true`; uncertain unwind results keep the position recorded and activate the kill switch.
+- Added regression coverage for partial close fills and watchdog retention of unverified positions.
 - Added focused regression tests for side-aware price rounding, unverifiable balances, unsafe reduce-only fallback, and unknown fill state.
 
 **Verification caveat:** these commits were written through GitHub's contents API. The Python test suite has not yet been executed in a runtime in this session. CI must pass before merge or live deployment.
