@@ -542,3 +542,35 @@ def test_unknown_order_fill_is_not_assumed_to_be_fully_filled():
     )
     assert filled == 0.0
     assert status == "unknown"
+
+
+def test_unwind_remains_pending_when_close_orders_are_partially_filled():
+    class PartialCloseExchange(MockExchange):
+        def create_order(self, symbol, order_type, side, amount, price=None, params=None):
+            order = {
+                "id": f"{self.name}_partial_close",
+                "symbol": symbol,
+                "type": order_type,
+                "side": side,
+                "amount": amount,
+                "filled": amount * 0.5,
+                "price": price,
+                "status": "open",
+            }
+            self.orders.append(order)
+            return order
+
+    ex_a = PartialCloseExchange("okx")
+    ex_b = PartialCloseExchange("bybit")
+    executor = DeltaNeutralExecutor({"okx": ex_a, "bybit": ex_b})
+    position = {
+        "base_asset": "BTC",
+        "qty": 0.05,
+        "leg_a": {"exchange": "okx", "symbol": "BTC/USDT:USDT", "side": "buy"},
+        "leg_b": {"exchange": "bybit", "symbol": "BTC/USDT:USDT", "side": "sell"},
+    }
+    result = executor.unwind_route(position)
+    assert result["status"] == "UNWIND_PENDING"
+    assert result["verified_flat"] is False
+    assert result["leg_a_verified"] is False
+    assert result["leg_b_verified"] is False
