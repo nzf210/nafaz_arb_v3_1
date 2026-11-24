@@ -327,7 +327,8 @@ def test_watchdog_reconciliation_margin_and_adl():
     unwound = watchdog.check_adl_indicators(adl_positions)
     assert len(unwound) == 1
     assert unwound[0]["adl_rank"] == 4
-    assert unwound[0]["unwind"]["status"] == "UNWOUND_1TO1"
+    assert unwound[0]["unwind"]["status"] == "UNWIND_PENDING"
+    assert redis.get("core:kill_switch") == "true"
     assert any("[ADL WARNING]" in m for m in notifier.outbox)
 
 
@@ -458,7 +459,9 @@ def test_live_balance_check_ccxt_margin_adl_and_preflight():
     unwound = watchdog.check_adl_indicators()
     assert len(unwound) == 1
     assert unwound[0]["adl_rank"] == 4
-    assert json.loads(redis.get("core:positions")) == []
+    remaining_positions = json.loads(redis.get("core:positions"))
+    assert len(remaining_positions) == 1
+    assert remaining_positions[0]["base_asset"] == "BTC"
 
     # Auto-exit when funding spread flips negative (including perp-perp interval mismatch)
     ex_okx.fetch_funding_rate = lambda sym: {"fundingRate": 0.0002}
