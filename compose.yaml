@@ -38,6 +38,10 @@ services:
       context: .
       dockerfile: Containerfile.scanner
     container_name: nafaz_scanner
+    dns:
+      - 10.88.0.1
+      - 1.1.1.1
+      - 8.8.8.8
     env_file:
       - .env
     environment:
@@ -53,6 +57,10 @@ services:
       context: .
       dockerfile: Containerfile.executor
     container_name: nafaz_executor
+    dns:
+      - 10.88.0.1
+      - 1.1.1.1
+      - 8.8.8.8
     env_file:
       - .env
     environment:
