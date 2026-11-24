@@ -1,0 +1,71 @@
+services:
+  redis:
+    image: docker.io/library/redis:7-alpine
+    container_name: nafaz_redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  postgres:
+    image: docker.io/library/postgres:16-alpine
+    container_name: nafaz_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-nafaz}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nafaz_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-nafaz_arb}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./configs/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nafaz} -d ${POSTGRES_DB:-nafaz_arb}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  scanner:
+    build:
+      context: .
+      dockerfile: Containerfile.scanner
+    container_name: nafaz_scanner
+    env_file:
+      - .env
+    environment:
+      REDIS_ADDR: ${REDIS_ADDR:-redis:6379}
+      DRY_RUN: ${DRY_RUN:-true}
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  executor:
+    build:
+      context: .
+      dockerfile: Containerfile.executor
+    container_name: nafaz_executor
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://nafaz:nafaz_secret@postgres:5432/nafaz_arb}
+      DRY_RUN: ${DRY_RUN:-true}
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  pg_data:

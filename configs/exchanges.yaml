@@ -1,0 +1,63 @@
+exchanges:
+  okx:
+    enabled: true
+    base_url: "https://www.okx.com"
+    ws_url: "wss://ws.okx.com:8443/ws/v5/public"
+    spot_taker_fee: 0.0008
+    perp_taker_fee: 0.0005
+    rate_limit_rps: 15
+    max_retries: 3
+    circuit_breaker_threshold: 5
+    symbol_allowlist:
+      - "BTC"
+      - "ETH"
+      - "SOL"
+    symbol_blocklist: []
+    unified_margin: true
+    polling:
+      book_interval_ms: 750
+      funding_interval_sec: 30
+      funding_fast_interval_sec: 5
+      collateral_interval_sec: 1800
+
+  bybit:
+    enabled: true
+    base_url: "https://api.bybit.com"
+    ws_url: "wss://stream.bybit.com/v5/public"
+    spot_taker_fee: 0.0010
+    perp_taker_fee: 0.00055
+    rate_limit_rps: 15
+    max_retries: 3
+    circuit_breaker_threshold: 5
+    symbol_allowlist:
+      - "BTC"
+      - "ETH"
+      - "SOL"
+    symbol_blocklist: []
+    unified_margin: true
+    polling:
+      book_interval_ms: 750
+      funding_interval_sec: 30
+      funding_fast_interval_sec: 5
+      collateral_interval_sec: 1800
+
+  mexc:
+    enabled: true
+    base_url: "https://api.mexc.com"
+    ws_url: "wss://wbs.mexc.com/ws"
+    spot_taker_fee: 0.0005
+    perp_taker_fee: 0.0002
+    rate_limit_rps: 15
+    max_retries: 3
+    circuit_breaker_threshold: 5
+    symbol_allowlist:
+      - "BTC"
+      - "ETH"
+      - "SOL"
+    symbol_blocklist: []
+    unified_margin: false
+    polling:
+      book_interval_ms: 750
+      funding_interval_sec: 30
+      funding_fast_interval_sec: 5
+      collateral_interval_sec: 1800
