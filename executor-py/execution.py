@@ -22,8 +22,8 @@ def round_price(price: float, tick_size: float, side: str = "buy") -> float:
     if tick_size <= 0:
         raise ValueError("tick_size must be > 0")
     p, t = _to_dec(price), _to_dec(tick_size)
-    _ = side
-    units = (p / t).to_integral_value(rounding=ROUND_DOWN)
+    rounding = ROUND_CEILING if side.lower() == "sell" else ROUND_DOWN
+    units = (p / t).to_integral_value(rounding=rounding)
     return float(units * t)
 
 
@@ -167,18 +167,20 @@ class DeltaNeutralExecutor:
         """Verify exchange has enough free USDT balance when fetch_balance is available."""
         client = self.exchanges.get(exchange)
         if not client or not hasattr(client, "fetch_balance"):
-            return True
+            logger.error("Cannot verify free USDT balance on %s; rejecting live execution", exchange)
+            return False
         try:
             bal = client.fetch_balance()
             free_usdt = bal.get("free", {}).get("USDT")
             if free_usdt is None:
                 free_usdt = bal.get("USDT", {}).get("free")
             if free_usdt is None:
-                return True
+                logger.error("Free USDT balance missing on %s; rejecting live execution", exchange)
+                return False
             return float(free_usdt) >= required_usdt
         except Exception as exc:
             logger.warning("Failed to check balance on %s: %s", exchange, exc)
-            return True
+            return False
 
     def _place_leg_a(
         self, ex_a: str, client_a: Any, sym_a: str, side_a: str, qty: float, price_a: float
@@ -370,8 +372,10 @@ class DeltaNeutralExecutor:
         if PERP_SUFFIX in symbol:
             try:
                 return client.create_order(symbol, "market", close_side, ord_amt, None, {"reduceOnly": True})
-            except TypeError:
-                return client.create_order(symbol, "market", close_side, ord_amt, None)
+            except TypeError as exc:
+                raise RuntimeError(
+                    f"{exchange} client rejected reduceOnly; refusing an unsafe non-reduce-only close"
+                ) from exc
         if close_side == "buy" and ref_price is not None and ref_price > 0:
             return client.create_order(symbol, "market", close_side, ord_amt, ref_price)
         return client.create_order(symbol, "market", close_side, ord_amt, None)
