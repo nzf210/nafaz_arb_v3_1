@@ -1,7 +1,7 @@
 # Product Requirements Document (PRD) & Roadmap — `nafaz_arb` v3.1
 
 **Versi Dokumen:** 3.1.0  
-**Status:** Siap Review & Implementasi  
+**Status:** Baseline requirements; implementation gaps tracked in [Implementation Gap Analysis](./IMPLEMENTATION_GAP_ANALYSIS_2026-11-24.md)  
 **Fokus Arsitektur:** 100% Pasar Global (Linear USDT), *Delta-Neutral* 1:1, *Modular Multi-CEX Scanner* (Golang) & *Executor/Watchdog* (Python)
 
 ---
@@ -11,7 +11,7 @@
 `nafaz_arb` v3.1 adalah pembaruan arsitektur sistem arbitrase dan *carry* kripto yang berfokus penuh pada **pasar global berdenominasi USDT** (*linear pairs*), meninggalkan pasar *spot* lokal IDR yang memiliki keterbatasan likuiditas dan friksi konversi kurs.
 
 ### Sasaran Utama
-1. **Imbal Hasil Terukur & Stabil:** Mengincar *return* bersih realistis di kisaran **4% – 7% per bulan** melalui strategi *delta-neutral* murni 1:1 (*Funding Rate Arbitrage* termasuk *interval mismatch* 1j/4j/8j serta *Spot–Perp Unified Margin*), bukan tebakan arah (*directional*) maupun *reactive partial-hedging*.
+1. **Profitabilitas Bersih yang Terukur:** Mengoptimalkan expected net PnL yang telah memperhitungkan fee, slippage, funding, financing, dan risiko eksekusi. Tidak ada target persentase bulanan yang dianggap terjamin; kelayakan strategi harus dibuktikan melalui data historis, shadow mode, dan realized PnL setelah biaya.
 2. **Modularitas Lintas Bursa (*Plug-and-Play CEX*):** Memisahkan inti kalkulasi *arbitrage/carry* dari dialek API tiap bursa melalui kontrak `ExchangeAdapter` dan *registry* dinamis, sehingga penambahan CEX baru tidak mengubah logika *engine* utama.
 3. **Skalabilitas & Keamanan Operasional:** Menerapkan *staleness gate* ketat per jenis data, pemisahan ritme *polling* untuk melindungi *rate limit*, evaluasi multi-profil dalam satu *tick*, serta deduplikasi sinyal terversi (`schema_version: "3.1"`) di Redis.
 
@@ -20,7 +20,7 @@
 ## 2. Ruang Lingkup (Scope)
 
 ### 2.1 Dalam Cakupan (*In-Scope*)
-* **Instrumen Pasar:** Pasangan *spot* (`BASE/USDT`) dan kontrak *perpetual* linear (`BASE/USDT:USDT`) pada CEX global yang likuid.
+* **Instrumen Pasar:** Katalog market spot (`BASE/USDT`) dan kontrak perpetual linear (`BASE/USDT:USDT`) pada CEX global yang likuid. Discovery berasal dari katalog market exchange; allow/block list hanya menjadi filter kebijakan.
 * **Tipe Rute Otomatis (*Auto-Generated Routes*):**
   * `spot_perp_same_cex`: *Buy Spot* + *Short Perp* 1:1 dalam satu akun *Unified Margin* (dengan validasi *collateral ratio* minimum).
   * `perp_perp_cross_cex`: *Long Perp* di CEX A + *Short Perp* di CEX B (termasuk pemanfaatan *funding interval mismatch* 1 jam, 4 jam, dan 8 jam).
@@ -73,12 +73,12 @@ Sinyal dinyatakan layak terbit apabila memenuhi seluruh kriteria profil aktif:
 
 | ID | Kebutuhan | Kriteria Penerimaan (*Acceptance Criteria*) |
 | :--- | :--- | :--- |
-| **FR-1** | **Modular CEX Adapter & Registry** | Menambah CEX baru cukup membuat paket adapter (`ExchangeAdapter`), mendaftarkannya di `Registry`, dan mengaktifkannya di file YAML tanpa mengubah paket `engine`. |
+| **FR-1** | **Modular CEX Adapter & Registry** | Adapter mengekspos katalog market dan metadata trading; engine memfilter katalog tanpa hardcoded coin whitelist sebagai sumber discovery. |
 | **FR-2** | **Normalisasi Simbol & Interval** | Simbol mentah diterjemahkan ke `BASE/USDT` dan `BASE/USDT:USDT` sambil menyimpan `RawSymbol`; `IntervalHours` dibaca dinamis dan divalidasi $> 0$. |
 | **FR-3** | **Auto-Route Matrix Generator** | Kandidat rute dibentuk otomatis dari *snapshot* CEX sehat berdasarkan `Capabilities` (`HasSpot`, `HasPerp`, `HasCollateralInfo`) dan *policy* rute aktif. |
 | **FR-4** | **Multi-Profile Evaluation** | Satu proses *scanner* dapat mengevaluasi beberapa profil aturan (misal `funding_carry_core` dan `basis_convergence_fast`) di atas *snapshot* yang sama per *tick*. |
 | **FR-5** | **Kontrak Sinyal & Deduplikasi Redis** | Sinyal membawa `schema_version: "3.1"`, `generated_at_ms`, dan `expires_at_ms`; sinyal identik ditahan selama `DedupCooldown` kecuali ada lonjakan `NetDailyYield` $\ge$ `MinYieldDelta`. |
-| **FR-6** | **Eksekusi 1:1 & Risk Watchdog** | *Executor* memvalidasi `expires_at_ms`, membuka/menutup dua kaki secara seimbang 1:1, menangani *partial fill*, mematuhi *guardrail* bursa, dan mengirim *alert* Telegram. |
+| **FR-6** | **Eksekusi 1:1 & Risk Watchdog** | *Executor* memvalidasi `expires_at_ms`, melacak order/fill/cancel per kaki, menangani *partial fill*, dan hanya menyatakan posisi `CLOSED` setelah kedua kaki diverifikasi flat di exchange. |
 
 ---
 
@@ -157,3 +157,16 @@ nafaz_arb_v3_1/
 * [ ] Menjalankan *pipeline* lengkap dalam mode **Dry-Run / Shadow** di VPS selama minimal 3–5 hari untuk memvalidasi kualitas sinyal, kestabilan koneksi 24/7, dan kepatuhan *rate limit*.
 * [ ] Melakukan uji **Canary Live** dengan ukuran *notional* kecil pada rute prioritas untuk memverifikasi akurasi *slippage* aktual, pencatatan *funding* masuk, dan prosedur *close/unwind*.
 * [ ] Melakukan evaluasi hasil bersih setelah biaya transaksi dan meningkatkan alokasi modal secara bertahap dengan tetap menjaga *buffer* margin dan dana darurat terpisah di luar bursa.
+
+## 8. Implementation status and release safety
+
+The original phase checklist describes intended architecture, not proof that each feature is production-complete. Current source-level gaps and implementation status are maintained in [IMPLEMENTATION_GAP_ANALYSIS_2026-11-24.md](./IMPLEMENTATION_GAP_ANALYSIS_2026-11-24.md).
+
+Production release is blocked until:
+- live balance and order-state checks fail closed;
+- partial fills, cancel races, and emergency unwinds are reconciled against exchange state;
+- a position cannot be marked closed before both legs are verified flat;
+- durable signal delivery and idempotent execution mutations are implemented;
+- integration/fault-injection tests and CI pass.
+
+Monthly ROI is not a release acceptance criterion. Use risk-adjusted realized net PnL, drawdown, exposure drift, unresolved-order count, and operational reliability instead.
