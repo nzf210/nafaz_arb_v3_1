@@ -46,7 +46,7 @@ class MockExchange:
         self.positions = []
         self.margin_ratio = 0.25
 
-    def create_order(self, symbol: str, order_type: str, side: str, amount: float, price=None):
+    def create_order(self, symbol: str, order_type: str, side: str, amount: float, price=None, params=None):
         if self.fail_create:
             raise RuntimeError(f"{self.name} create_order timeout/failure")
         # Market unwind orders always fill 100%
@@ -537,4 +537,4 @@ def test_unknown_order_fill_is_not_assumed_to_be_fully_filled():
         1.0,
     )
     assert filled == 0.0
-    assert status == "closed"
+    assert status == "unknown"
