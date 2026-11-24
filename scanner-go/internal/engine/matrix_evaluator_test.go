@@ -24,7 +24,7 @@ func TestComputeVWAP_SlippageAndInsufficientDepth(t *testing.T) {
 			{Price: 99.0, Quantity: 10.0}, // 990 USDT
 		},
 		Asks: []domain.OrderBookLevel{
-			{Price: 101.0, Quantity: 5.0}, // 505 USDT
+			{Price: 101.0, Quantity: 5.0},  // 505 USDT
 			{Price: 103.0, Quantity: 10.0}, // 1030 USDT
 		},
 		Volume24hUSDT: 5_000_000,
@@ -243,7 +243,7 @@ func TestMatrixEvaluator_StalenessAndCollateralGates(t *testing.T) {
 	if sigs[0].RouteType != domain.RouteSpotPerpSameCEX {
 		t.Fatalf("expected route spot_perp_same_cex, got %s", sigs[0].RouteType)
 	}
-	if sigs[0].DedupKey != "spot_perp_same_cex:BTC:okx:okx" {
+	if sigs[0].DedupKey != "funding_carry_core:spot_perp_same_cex:BTC:okx:okx" {
 		t.Fatalf("unexpected dedup key: %s", sigs[0].DedupKey)
 	}
 }
@@ -360,8 +360,9 @@ func TestMatrixEvaluator_MultiProfileAndVWAPCacheSharing(t *testing.T) {
 		if err := sig.Validate(); err != nil {
 			t.Fatalf("invalid signal emitted: %v", err)
 		}
-		if sig.DedupKey != "perp_perp_cross_cex:ETH:okx:bybit" {
-			t.Fatalf("unexpected dedup_key: %s", sig.DedupKey)
+		expectedDedup := sig.ProfileID + ":perp_perp_cross_cex:ETH:okx:bybit"
+		if sig.DedupKey != expectedDedup {
+			t.Fatalf("unexpected dedup_key: %s (want %s)", sig.DedupKey, expectedDedup)
 		}
 		if sig.ExpiresAtMs != nowMs+2500 {
 			t.Fatalf("expected expires_at_ms %d, got %d", nowMs+2500, sig.ExpiresAtMs)

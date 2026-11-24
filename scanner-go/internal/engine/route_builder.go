@@ -333,7 +333,7 @@ func (e *MatrixEvaluator) evaluateCandidateForProfile(
 		return domain.SignalPayload{}, false
 	}
 
-	dedupKey := fmt.Sprintf("%s:%s:%s:%s", cand.routeType, cand.baseAsset, cand.cexA.Name, cand.cexB.Name)
+	dedupKey := fmt.Sprintf("%s:%s:%s:%s:%s", prof.ID, cand.routeType, cand.baseAsset, cand.cexA.Name, cand.cexB.Name)
 	sigID := fmt.Sprintf("sig_%s_%s_%s_%s_%d", prof.ID, cand.cexA.Name, cand.cexB.Name, cand.baseAsset, nowMs)
 	return domain.SignalPayload{
 		SchemaVersion:      domain.SchemaVersionV31,

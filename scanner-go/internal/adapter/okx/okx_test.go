@@ -76,9 +76,9 @@ func TestFetchEndpointsAnd429Retry(t *testing.T) {
 	defer srv.Close()
 
 	a, err := NewAdapter(domain.ExchangeConfig{
-		BaseURL:      srv.URL,
-		RateLimitRPS: 100,
-		MaxRetries:   3,
+		BaseURL:       srv.URL,
+		RateLimitRPS:  100,
+		MaxRetries:    3,
 		UnifiedMargin: true,
 	})
 	if err != nil {

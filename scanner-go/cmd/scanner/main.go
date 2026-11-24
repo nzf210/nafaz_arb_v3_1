@@ -54,7 +54,7 @@ type Runner struct {
 	Store             *engine.StateStore
 	Evaluator         *engine.MatrixEvaluator
 	Publisher         *sink.SignalPublisher
-	 pollMu            sync.Mutex
+	pollMu            sync.Mutex
 	lastFundingPollMs map[string]int64
 	lastCollatPollMs  map[string]int64
 }
@@ -119,7 +119,7 @@ func (r *Runner) shouldPollCollateral(name string, intervalSec int, nowMs int64)
 func (r *Runner) shouldPollFunding(key string, sym domain.CanonSymbol, exName string, cfg domain.PollingConfig, nowMs int64) bool {
 	intervalSec := cfg.FundingIntervalSec
 	if snap, ok := r.Store.GetFunding(exName, sym); ok && snap != nil && snap.NextSettlementMs > nowMs {
-		if (snap.NextSettlementMs - nowMs) <= 2*60*1000 && cfg.FundingFastIntervalSec > 0 {
+		if (snap.NextSettlementMs-nowMs) <= 2*60*1000 && cfg.FundingFastIntervalSec > 0 {
 			intervalSec = cfg.FundingFastIntervalSec
 		}
 	}
