@@ -518,3 +518,20 @@ def test_perpetual_close_refuses_non_reduce_only_fallback():
     executor = DeltaNeutralExecutor({"okx": RejectReduceOnly()})
     with pytest.raises(RuntimeError, match="refusing an unsafe non-reduce-only close"):
         executor._create_close_order("okx", executor.exchanges["okx"], "BTC/USDT:USDT", "sell", 0.01)
+
+
+def test_unknown_order_fill_is_not_assumed_to_be_fully_filled():
+    class UnknownOrder:
+        def fetch_order(self, order_id, symbol):
+            raise RuntimeError("order endpoint unavailable")
+
+    executor = DeltaNeutralExecutor({})
+    filled, status = executor._resolve_filled_base(
+        UnknownOrder(),
+        "BTC/USDT:USDT",
+        {"id": "order-unknown", "filled": None, "status": None},
+        0.02,
+        1.0,
+    )
+    assert filled == 0.0
+    assert status == "closed"
