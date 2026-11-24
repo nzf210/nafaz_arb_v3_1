@@ -484,3 +484,37 @@ def test_live_balance_check_ccxt_margin_adl_and_preflight():
     redis.ping = lambda: True
     assert run_preflight(redis, None, dry_run=True) is True
 
+
+
+def test_round_price_respects_order_side():
+    assert round_price(100.01, 0.1, "buy") == pytest.approx(100.0)
+    assert round_price(100.01, 0.1, "sell") == pytest.approx(100.1)
+
+
+def test_live_balance_check_fails_closed_when_unverifiable():
+    executor_without_client = DeltaNeutralExecutor({})
+    assert executor_without_client.check_sufficient_balance("missing", 10.0) is False
+
+    class MissingBalance:
+        def fetch_balance(self):
+            return {"free": {}, "USDT": {}}
+
+    class FailingBalance:
+        def fetch_balance(self):
+            raise RuntimeError("temporary exchange outage")
+
+    executor = DeltaNeutralExecutor({"missing_data": MissingBalance(), "offline": FailingBalance()})
+    assert executor.check_sufficient_balance("missing_data", 10.0) is False
+    assert executor.check_sufficient_balance("offline", 10.0) is False
+
+
+def test_perpetual_close_refuses_non_reduce_only_fallback():
+    class RejectReduceOnly:
+        def create_order(self, symbol, order_type, side, amount, price=None, params=None):
+            if params and params.get("reduceOnly") is True:
+                raise TypeError("reduceOnly unsupported")
+            pytest.fail("unsafe close without reduceOnly must never be submitted")
+
+    executor = DeltaNeutralExecutor({"okx": RejectReduceOnly()})
+    with pytest.raises(RuntimeError, match="refusing an unsafe non-reduce-only close"):
+        executor._create_close_order("okx", executor.exchanges["okx"], "BTC/USDT:USDT", "sell", 0.01)
