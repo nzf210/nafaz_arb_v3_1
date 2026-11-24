@@ -1,10 +1,8 @@
 # Build stage
 FROM docker.io/library/golang:1.23-alpine AS builder
 WORKDIR /src/scanner-go
-COPY scanner-go/go.mod scanner-go/go.sum ./
-RUN go mod download
 COPY scanner-go/ ./
-RUN CGO_ENABLED=0 GOOS=linux go build -o /out/scanner ./cmd/scanner
+RUN CGO_ENABLED=0 GOOS=linux go build -mod=vendor -o /out/scanner ./cmd/scanner
 
 # Runtime stage
 FROM docker.io/library/alpine:3.20
