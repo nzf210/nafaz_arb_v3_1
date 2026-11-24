@@ -1,6 +1,7 @@
 FROM docker.io/library/python:3.12-slim
 WORKDIR /app
-RUN pip install --no-cache-dir ccxt redis pyyaml "psycopg[binary]"
+COPY executor-py/wheels/ /tmp/wheels/
+RUN pip install --no-cache-dir /tmp/wheels/*.whl && rm -rf /tmp/wheels
 COPY executor-py/ /app/executor-py/
 COPY configs/ /app/configs/
 ENV PYTHONPATH=/app/executor-py
