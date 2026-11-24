@@ -267,7 +267,8 @@ def test_unwind_route_closes_both_legs():
         "leg_b": {"exchange": "bybit", "symbol": "BTC/USDT:USDT", "side": "sell"},
     }
     res = executor.unwind_route(position)
-    assert res["status"] == "UNWOUND_1TO1"
+    assert res["status"] == "UNWOUND_VERIFIED"
+    assert res["verified_flat"] is True
     assert ex_okx.orders[0]["side"] == "sell"
     assert ex_bybit.orders[0]["side"] == "buy"
 
