@@ -448,12 +448,18 @@ class DeltaNeutralExecutor:
         client_b = self.exchanges[leg_b["exchange"]]
         ref_a = float(leg_a.get("price") or leg_a.get("vwap_price") or 0.0) or None
         ref_b = float(leg_b.get("price") or leg_b.get("vwap_price") or 0.0) or None
-        order_a, verified_a, detail_a = self._close_leg_and_verify(
-            leg_a["exchange"], client_a, sym_a, close_side_a, qty, ref_a
-        )
-        order_b, verified_b, detail_b = self._close_leg_and_verify(
-            leg_b["exchange"], client_b, sym_b, close_side_b, qty, ref_b
-        )
+        try:
+            order_a, verified_a, detail_a = self._close_leg_and_verify(
+                leg_a["exchange"], client_a, sym_a, close_side_a, qty, ref_a
+            )
+        except Exception as exc:
+            order_a, verified_a, detail_a = None, False, f"close_error:{exc}"
+        try:
+            order_b, verified_b, detail_b = self._close_leg_and_verify(
+                leg_b["exchange"], client_b, sym_b, close_side_b, qty, ref_b
+            )
+        except Exception as exc:
+            order_b, verified_b, detail_b = None, False, f"close_error:{exc}"
         verified = verified_a and verified_b
         status = "UNWOUND_VERIFIED" if verified else "UNWIND_PENDING"
         if self.notifier:
