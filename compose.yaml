@@ -69,6 +69,7 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://nafaz_redis:6379/0}
       DATABASE_URL: ${DATABASE_URL:-postgresql://nafaz:nafaz_secret@nafaz_postgres:5432/nafaz_arb}
       DRY_RUN: ${DRY_RUN:-true}
+      PYTHONUNBUFFERED: "1"
       HTTPS_PROXY: ${HTTPS_PROXY:-}
       HTTP_PROXY: ${HTTP_PROXY:-}
       TELEGRAM_API_BASE_URL: ${TELEGRAM_API_BASE_URL:-https://api.telegram.org}

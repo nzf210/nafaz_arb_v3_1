@@ -4,5 +4,5 @@ COPY executor-py/wheels/ /tmp/wheels/
 RUN pip install --no-cache-dir /tmp/wheels/*.whl && rm -rf /tmp/wheels
 COPY executor-py/ /app/executor-py/
 COPY configs/ /app/configs/
-ENV PYTHONPATH=/app/executor-py
+ENV PYTHONPATH=/app/executor-py PYTHONUNBUFFERED=1
 CMD ["python", "/app/executor-py/main.py"]
