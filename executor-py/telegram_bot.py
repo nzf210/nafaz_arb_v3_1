@@ -36,13 +36,13 @@ class TelegramBot:
         watchdog: Optional[Any] = None,
         exchanges: Optional[Dict[str, Any]] = None,
         canary_cap: float = 20.0,
-        consumer: Optional[Any] = None,
         send_enabled: bool = True,
     ):
         self.bot_token = bot_token or os.getenv("TELEGRAM_BOT_TOKEN", "")
         self.chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID", "")
         self.allowed_chat_ids = allowed_chat_ids or self._parse_ids(os.getenv("TELEGRAM_ALLOWED_CHAT_IDS", ""))
         self.allowed_user_ids = allowed_user_ids or self._parse_ids(os.getenv("TELEGRAM_ALLOWED_USER_IDS", ""))
+        self.api_base_url = os.getenv("TELEGRAM_API_BASE_URL", "https://api.telegram.org").rstrip("/")
         self.dry_run = dry_run
         self.redis = redis_client
         self.db_store = db_store
@@ -50,7 +50,7 @@ class TelegramBot:
         self.watchdog = watchdog
         self.exchanges = exchanges or {}
         self.canary_cap = canary_cap
-        self.consumer = consumer
+        self.consumer: Optional[Any] = None
         self.send_enabled = send_enabled
 
         self.bot_username = ""
@@ -111,7 +111,7 @@ class TelegramBot:
         logger.info("Telegram outbox: %s", text[:120])
         if not self.send_enabled or not self.bot_token or not chat_id:
             return True
-        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        url = f"{self.api_base_url}/bot{self.bot_token}/sendMessage"
         payload: Dict[str, Any] = {"chat_id": chat_id, "text": text[:4000], "parse_mode": "HTML"}
         if reply_markup:
             payload["reply_markup"] = reply_markup
@@ -136,7 +136,7 @@ class TelegramBot:
     def answer_callback(self, callback_id: str, text: str = "") -> None:
         if not self.send_enabled or not self.bot_token:
             return
-        url = f"https://api.telegram.org/bot{self.bot_token}/answerCallbackQuery"
+        url = f"{self.api_base_url}/bot{self.bot_token}/answerCallbackQuery"
         body = json.dumps({"callback_query_id": callback_id, "text": text}).encode("utf-8")
         req = urllib.request.Request(url, data=body, headers={"Content-Type": JSON_CONTENT_TYPE})
         try:
@@ -167,7 +167,7 @@ class TelegramBot:
             {"command": "killswitch", "description": "🛑 Hentikan/lanjutkan entry"},
             {"command": "help", "description": "ℹ️ Petunjuk lengkap"},
         ]
-        url = f"https://api.telegram.org/bot{self.bot_token}/setMyCommands"
+        url = f"{self.api_base_url}/bot{self.bot_token}/setMyCommands"
         body = json.dumps({"commands": commands}).encode("utf-8")
         req = urllib.request.Request(url, data=body, headers={"Content-Type": JSON_CONTENT_TYPE})
         try:
@@ -435,7 +435,7 @@ class TelegramBot:
                 time.sleep(3)
 
     def _get_updates(self, offset: int) -> List[Dict[str, Any]]:
-        url = f"https://api.telegram.org/bot{self.bot_token}/getUpdates?offset={offset}&timeout=15"
+        url = f"{self.api_base_url}/bot{self.bot_token}/getUpdates?offset={offset}&timeout=15"
         req = urllib.request.Request(url, headers={"User-Agent": "nafaz_arb_bot"})
         with urllib.request.urlopen(req, timeout=20) as resp:
             data = json.loads(resp.read().decode("utf-8"))
