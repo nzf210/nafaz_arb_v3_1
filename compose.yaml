@@ -59,19 +59,16 @@ services:
       context: .
       dockerfile: Containerfile.executor
     container_name: nafaz_executor
-    dns:
-      - 10.88.0.1
-      - 208.67.222.222
-      - 208.67.220.220
+    network_mode: host
     env_file:
       - .env
     environment:
-      REDIS_URL: ${REDIS_URL:-redis://nafaz_redis:6379/0}
-      DATABASE_URL: ${DATABASE_URL:-postgresql://nafaz:nafaz_secret@nafaz_postgres:5432/nafaz_arb}
+      REDIS_URL: ${REDIS_URL:-redis://127.0.0.1:6379/0}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://nafaz:nafaz_secret@127.0.0.1:5432/nafaz_arb}
       DRY_RUN: ${DRY_RUN:-true}
       PYTHONUNBUFFERED: "1"
-      HTTPS_PROXY: ${HTTPS_PROXY:-}
-      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-http://127.0.0.1:8888}
+      HTTP_PROXY: ${HTTP_PROXY:-http://127.0.0.1:8888}
       TELEGRAM_API_BASE_URL: ${TELEGRAM_API_BASE_URL:-https://api.telegram.org}
     depends_on:
       redis:
