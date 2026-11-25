@@ -3,6 +3,7 @@ package mexc
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,10 +62,15 @@ func (a *Adapter) fetchSpotMarkets(ctx context.Context, nowMs int64) ([]domain.M
 		Symbols []mexcSpotSymbolItem `json:"symbols"`
 	}
 	if err := json.Unmarshal(body, &resp); err == nil && len(resp.Symbols) > 0 {
+		var vols map[string]float64
+		if len(resp.Symbols) > 20 {
+			vols = a.prefetchBulkSpotVolumes(ctx, nowMs)
+		}
 		out := make([]domain.MarketDescriptor, 0, len(resp.Symbols))
 		for _, item := range resp.Symbols {
 			desc, ok := a.spotItemToDescriptor(item, nowMs)
 			if ok && a.cfg.AllowsMarket(desc) {
+				desc.Volume24hUSDT = vols[desc.RawSymbol]
 				out = append(out, desc)
 			}
 		}
@@ -72,6 +78,31 @@ func (a *Adapter) fetchSpotMarkets(ctx context.Context, nowMs int64) ([]domain.M
 	}
 
 	return a.parseFallbackMarkets(body, domain.MarketTypeSpot, nowMs), nil
+}
+
+func (a *Adapter) prefetchBulkSpotVolumes(ctx context.Context, nowMs int64) map[string]float64 {
+	url := strings.TrimRight(a.cfg.BaseURL, "/") + "/api/v3/ticker/24hr"
+	body, _, err := a.client.GetJSON(ctx, url)
+	if err != nil {
+		return nil
+	}
+	var list []struct {
+		Symbol      string `json:"symbol"`
+		QuoteVolume string `json:"quoteVolume"`
+	}
+	if json.Unmarshal(body, &list) != nil || len(list) == 0 {
+		return nil
+	}
+	vols := make(map[string]float64, len(list))
+	a.volMu.Lock()
+	for _, d := range list {
+		if vol, err := strconv.ParseFloat(d.QuoteVolume, 64); err == nil && vol > 0 {
+			vols[d.Symbol] = vol
+			a.volCache[string(domain.MarketTypeSpot)+":"+d.Symbol] = cachedVol{vol: vol, expMs: nowMs + 300_000}
+		}
+	}
+	a.volMu.Unlock()
+	return vols
 }
 
 func (a *Adapter) spotItemToDescriptor(item mexcSpotSymbolItem, nowMs int64) (domain.MarketDescriptor, bool) {
@@ -117,10 +148,15 @@ func (a *Adapter) fetchContractMarkets(ctx context.Context, nowMs int64) ([]doma
 
 	items := decodeMEXCContractList(body)
 	if len(items) > 0 {
+		var vols map[string]float64
+		if len(items) > 20 {
+			vols = a.prefetchBulkContractVolumes(ctx, nowMs)
+		}
 		out := make([]domain.MarketDescriptor, 0, len(items))
 		for _, item := range items {
 			desc, ok := a.contractItemToDescriptor(item, nowMs)
 			if ok && a.cfg.AllowsMarket(desc) {
+				desc.Volume24hUSDT = vols[desc.RawSymbol]
 				out = append(out, desc)
 			}
 		}
@@ -128,6 +164,33 @@ func (a *Adapter) fetchContractMarkets(ctx context.Context, nowMs int64) ([]doma
 	}
 
 	return a.parseFallbackMarkets(body, domain.MarketTypeLinearPerp, nowMs), nil
+}
+
+func (a *Adapter) prefetchBulkContractVolumes(ctx context.Context, nowMs int64) map[string]float64 {
+	url := strings.TrimRight(a.cfg.BaseURL, "/") + "/api/v1/contract/ticker"
+	body, _, err := a.client.GetJSON(ctx, url)
+	if err != nil {
+		return nil
+	}
+	var resp struct {
+		Data []struct {
+			Symbol   string  `json:"symbol"`
+			Amount24 float64 `json:"amount24"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(body, &resp) != nil || len(resp.Data) == 0 {
+		return nil
+	}
+	vols := make(map[string]float64, len(resp.Data))
+	a.volMu.Lock()
+	for _, d := range resp.Data {
+		if d.Amount24 > 0 {
+			vols[d.Symbol] = d.Amount24
+			a.volCache[string(domain.MarketTypeLinearPerp)+":"+d.Symbol] = cachedVol{vol: d.Amount24, expMs: nowMs + 300_000}
+		}
+	}
+	a.volMu.Unlock()
+	return vols
 }
 
 func decodeMEXCContractList(body []byte) []mexcContractDetailItem {

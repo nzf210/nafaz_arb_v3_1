@@ -122,6 +122,7 @@ type MarketDescriptor struct {
 	MarketType         MarketType  `json:"market_type"`
 	Active             bool        `json:"active"`
 	ContractMultiplier float64     `json:"contract_multiplier,omitempty"`
+	Volume24hUSDT      float64     `json:"volume_24h_usdt,omitempty"`
 	DiscoveredAtMs     int64       `json:"discovered_at_ms"`
 }
 

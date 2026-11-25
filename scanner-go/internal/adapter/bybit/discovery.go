@@ -3,6 +3,7 @@ package bybit
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,21 +62,56 @@ func (a *Adapter) fetchCategoryMarkets(
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(body, &v5); err == nil && len(v5.Result.List) > 0 {
-		return a.parseBybitInstruments(v5.Result.List, mt, nowMs), nil
+		var vols map[string]float64
+		if len(v5.Result.List) > 20 {
+			vols = a.prefetchBulkVolumes(ctx, category, nowMs)
+		}
+		return a.parseBybitInstruments(v5.Result.List, mt, nowMs, vols), nil
 	}
 
 	return a.parseFallbackMarkets(body, mt, nowMs), nil
+}
+
+func (a *Adapter) prefetchBulkVolumes(ctx context.Context, category string, nowMs int64) map[string]float64 {
+	url := strings.TrimRight(a.cfg.BaseURL, "/") + "/v5/market/tickers?category=" + category
+	body, _, err := a.client.GetJSON(ctx, url)
+	if err != nil {
+		return nil
+	}
+	var resp struct {
+		Result struct {
+			List []struct {
+				Symbol      string `json:"symbol"`
+				Turnover24h string `json:"turnover24h"`
+			} `json:"list"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(body, &resp) != nil || len(resp.Result.List) == 0 {
+		return nil
+	}
+	vols := make(map[string]float64, len(resp.Result.List))
+	a.volMu.Lock()
+	for _, d := range resp.Result.List {
+		if vol, err := strconv.ParseFloat(d.Turnover24h, 64); err == nil && vol > 0 {
+			vols[d.Symbol] = vol
+			a.volCache[category+":"+d.Symbol] = cachedVol{vol: vol, expMs: nowMs + 300_000}
+		}
+	}
+	a.volMu.Unlock()
+	return vols
 }
 
 func (a *Adapter) parseBybitInstruments(
 	items []bybitInstrumentItem,
 	mt domain.MarketType,
 	nowMs int64,
+	vols map[string]float64,
 ) []domain.MarketDescriptor {
 	out := make([]domain.MarketDescriptor, 0, len(items))
 	for _, item := range items {
 		desc, ok := a.toMarketDescriptor(item, mt, nowMs)
 		if ok && a.cfg.AllowsMarket(desc) {
+			desc.Volume24hUSDT = vols[desc.RawSymbol]
 			out = append(out, desc)
 		}
 	}

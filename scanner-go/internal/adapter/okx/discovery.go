@@ -61,21 +61,66 @@ func (a *Adapter) fetchInstrumentType(
 		Data []okxInstrumentItem `json:"data"`
 	}
 	if err := json.Unmarshal(body, &v5); err == nil && len(v5.Data) > 0 {
-		return a.parseOKXInstruments(v5.Data, mt, nowMs), nil
+		var vols map[string]float64
+		if len(v5.Data) > 20 {
+			vols = a.prefetchBulkVolumes(ctx, instType, mt, nowMs)
+		}
+		return a.parseOKXInstruments(v5.Data, mt, nowMs, vols), nil
 	}
 
 	return a.parseFallbackMarkets(body, mt, nowMs), nil
+}
+
+func (a *Adapter) prefetchBulkVolumes(
+	ctx context.Context,
+	instType string,
+	mt domain.MarketType,
+	nowMs int64,
+) map[string]float64 {
+	url := strings.TrimRight(a.cfg.BaseURL, "/") + "/api/v5/market/tickers?instType=" + instType
+	body, _, err := a.client.GetJSON(ctx, url)
+	if err != nil {
+		return nil
+	}
+	var resp struct {
+		Data []struct {
+			InstID    string `json:"instId"`
+			Last      string `json:"last"`
+			VolCcy24h string `json:"volCcy24h"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(body, &resp) != nil || len(resp.Data) == 0 {
+		return nil
+	}
+	vols := make(map[string]float64, len(resp.Data))
+	a.volMu.Lock()
+	for _, d := range resp.Data {
+		vol, _ := strconv.ParseFloat(d.VolCcy24h, 64)
+		if mt != domain.MarketTypeSpot {
+			if last, _ := strconv.ParseFloat(d.Last, 64); vol > 0 && last > 0 {
+				vol *= last
+			}
+		}
+		if vol > 0 {
+			vols[d.InstID] = vol
+			a.volCache[d.InstID] = cachedVol{vol: vol, expMs: nowMs + 300_000}
+		}
+	}
+	a.volMu.Unlock()
+	return vols
 }
 
 func (a *Adapter) parseOKXInstruments(
 	items []okxInstrumentItem,
 	mt domain.MarketType,
 	nowMs int64,
+	vols map[string]float64,
 ) []domain.MarketDescriptor {
 	out := make([]domain.MarketDescriptor, 0, len(items))
 	for _, item := range items {
 		desc, ok := a.toMarketDescriptor(item, mt, nowMs)
 		if ok && a.cfg.AllowsMarket(desc) {
+			desc.Volume24hUSDT = vols[desc.RawSymbol]
 			out = append(out, desc)
 		}
 	}

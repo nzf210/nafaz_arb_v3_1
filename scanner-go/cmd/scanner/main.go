@@ -56,6 +56,7 @@ type Runner struct {
 	Evaluator           *engine.MatrixEvaluator
 	Publisher           *sink.SignalPublisher
 	pollMu              sync.Mutex
+	batchCursor         int
 	lastDiscoveryPollMs map[string]int64
 	lastFundingPollMs   map[string]int64
 	lastCollatPollMs    map[string]int64
@@ -141,6 +142,9 @@ func (r *Runner) releaseTask(taskKey string) {
 }
 
 func (r *Runner) DiscoverMarkets(ctx context.Context, force bool) {
+	discCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
 	nowMs := time.Now().UnixMilli()
 	var wg sync.WaitGroup
 	for name, ad := range r.Adapters {
@@ -157,7 +161,7 @@ func (r *Runner) DiscoverMarkets(ctx context.Context, force bool) {
 		wg.Add(1)
 		go func(exName string, exAdapter adapter.ExchangeAdapter, cfg domain.ExchangeConfig) {
 			defer wg.Done()
-			r.discoverSingleExchange(ctx, exName, exAdapter, cfg, nowMs)
+			r.discoverSingleExchange(discCtx, exName, exAdapter, cfg, nowMs)
 		}(name, ad, exCfg)
 	}
 	wg.Wait()
@@ -185,63 +189,25 @@ func (r *Runner) discoverSingleExchange(
 		}
 	}
 	if len(discovered) == 0 {
-		discovered = buildAllowlistFallbackDescriptors(name, ad, exCfg, nowMs)
+		caps := ad.Capabilities()
+		discovered = engine.BuildAllowlistFallbackDescriptors(name, caps.HasSpot, caps.HasPerp, ad.ToRawSymbol, exCfg, nowMs)
 	}
 	if len(discovered) == 0 && err != nil {
 		return
 	}
-	_, removed := r.MarketRegistry.UpdateExchangeMarkets(name, exCfg, discovered, nowMs)
+	added, removed := r.MarketRegistry.UpdateExchangeMarkets(name, exCfg, discovered, nowMs)
 	for _, rem := range removed {
 		r.Store.RemoveMarket(name, rem.CanonSymbol)
 		r.pollMu.Lock()
 		delete(r.lastFundingPollMs, name+":"+string(rem.CanonSymbol))
 		r.pollMu.Unlock()
 	}
-}
-
-func buildAllowlistFallbackDescriptors(
-	name string,
-	ad adapter.ExchangeAdapter,
-	exCfg domain.ExchangeConfig,
-	nowMs int64,
-) []domain.MarketDescriptor {
-	allow := exCfg.EffectiveDiscoveryConfig().Allowlist
-	if len(allow) == 0 {
-		return nil
-	}
-	caps := ad.Capabilities()
-	var out []domain.MarketDescriptor
-	for _, base := range allow {
-		if caps.HasSpot {
-			if sym, err := domain.NormalizeMarketSymbol(base, domain.QuoteAssetUSDT, domain.MarketTypeSpot); err == nil {
-				out = append(out, domain.MarketDescriptor{
-					Exchange:       name,
-					RawSymbol:      ad.ToRawSymbol(sym),
-					CanonSymbol:    sym,
-					BaseAsset:      sym.BaseAsset(),
-					QuoteAsset:     domain.QuoteAssetUSDT,
-					MarketType:     domain.MarketTypeSpot,
-					Active:         true,
-					DiscoveredAtMs: nowMs,
-				})
-			}
-		}
-		if caps.HasPerp {
-			if sym, err := domain.NormalizeMarketSymbol(base, domain.QuoteAssetUSDT, domain.MarketTypeLinearPerp); err == nil {
-				out = append(out, domain.MarketDescriptor{
-					Exchange:       name,
-					RawSymbol:      ad.ToRawSymbol(sym),
-					CanonSymbol:    sym,
-					BaseAsset:      sym.BaseAsset(),
-					QuoteAsset:     domain.QuoteAssetUSDT,
-					MarketType:     domain.MarketTypeLinearPerp,
-					Active:         true,
-					DiscoveredAtMs: nowMs,
-				})
-			}
-		}
-	}
-	return out
+	logJSON("info", "market discovery updated", map[string]any{
+		"exchange":       name,
+		"active_markets": len(r.MarketRegistry.ExchangeMarkets(name)),
+		"added":          len(added),
+		"removed":        len(removed),
+	})
 }
 
 func (r *Runner) MatchMarkets() engine.MatchResult {
@@ -283,6 +249,14 @@ func (r *Runner) shouldPollFunding(key string, sym domain.CanonSymbol, exName st
 }
 
 func (r *Runner) PollOnce(ctx context.Context) {
+	r.DiscoverMarkets(ctx, false)
+	matchRes := r.MatchMarkets()
+
+	r.pollMu.Lock()
+	batchTargets, nextCursor := engine.SelectSynchronizedPollBatch(matchRes, r.minProfileVolume(), 8, r.batchCursor)
+	r.batchCursor = nextCursor
+	r.pollMu.Unlock()
+
 	pollTimeout := time.Duration(r.ScannerCfg.Engine.TickIntervalMs) * time.Millisecond
 	if pollTimeout <= 0 {
 		pollTimeout = 2 * time.Second
@@ -290,16 +264,23 @@ func (r *Runner) PollOnce(ctx context.Context) {
 	pollCtx, cancel := context.WithTimeout(ctx, pollTimeout)
 	defer cancel()
 
-	r.DiscoverMarkets(pollCtx, false)
-	matchRes := r.MatchMarkets()
-
 	var wg sync.WaitGroup
 	for name, ad := range r.Adapters {
-		targets := matchRes.PollingTargets[name]
-		r.Store.RetainExchangeMarkets(name, targets)
-		r.scheduleExchangePoll(pollCtx, &wg, name, ad, targets)
+		fullTargets := matchRes.PollingTargets[name]
+		r.Store.RetainExchangeMarkets(name, fullTargets)
+		r.scheduleExchangePoll(pollCtx, &wg, name, ad, batchTargets[name], len(fullTargets))
 	}
 	wg.Wait()
+}
+
+func (r *Runner) minProfileVolume() float64 {
+	var minVol float64
+	for i, p := range r.ScannerCfg.Profiles {
+		if i == 0 || (p.MinVolume24hUSDT > 0 && p.MinVolume24hUSDT < minVol) {
+			minVol = p.MinVolume24hUSDT
+		}
+	}
+	return minVol
 }
 
 func (r *Runner) scheduleExchangePoll(
@@ -308,6 +289,7 @@ func (r *Runner) scheduleExchangePoll(
 	name string,
 	ad adapter.ExchangeAdapter,
 	targets []domain.MarketDescriptor,
+	totalMatched int,
 ) {
 	exCfg := r.ExchangesCfg.Exchanges[name]
 	caps := ad.Capabilities()
@@ -348,7 +330,7 @@ func (r *Runner) scheduleExchangePoll(
 			r.pollTargetDescriptor(ctx, wg, name, ad, d, exCfg.Polling, nowMs)
 		}(desc, taskKey)
 	}
-	_ = r.Publisher.UpdateExchangeHealth(ctx, name, "healthy", nowMs, len(targets), 0)
+	_ = r.Publisher.UpdateExchangeHealth(ctx, name, "healthy", nowMs, totalMatched, 0)
 }
 
 func (r *Runner) pollTargetDescriptor(

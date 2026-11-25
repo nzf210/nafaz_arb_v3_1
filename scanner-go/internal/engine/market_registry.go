@@ -343,3 +343,119 @@ func sortDescriptors(list []domain.MarketDescriptor) {
 		return list[i].CanonSymbol < list[j].CanonSymbol
 	})
 }
+
+func BuildAllowlistFallbackDescriptors(
+	name string,
+	hasSpot, hasPerp bool,
+	toRaw func(domain.CanonSymbol) string,
+	exCfg domain.ExchangeConfig,
+	nowMs int64,
+) []domain.MarketDescriptor {
+	allow := exCfg.EffectiveDiscoveryConfig().Allowlist
+	if len(allow) == 0 {
+		return nil
+	}
+	var out []domain.MarketDescriptor
+	for _, base := range allow {
+		if hasSpot {
+			if sym, err := domain.NormalizeMarketSymbol(base, domain.QuoteAssetUSDT, domain.MarketTypeSpot); err == nil {
+				out = append(out, domain.MarketDescriptor{
+					Exchange:       name,
+					RawSymbol:      toRaw(sym),
+					CanonSymbol:    sym,
+					BaseAsset:      sym.BaseAsset(),
+					QuoteAsset:     domain.QuoteAssetUSDT,
+					MarketType:     domain.MarketTypeSpot,
+					Active:         true,
+					DiscoveredAtMs: nowMs,
+				})
+			}
+		}
+		if hasPerp {
+			if sym, err := domain.NormalizeMarketSymbol(base, domain.QuoteAssetUSDT, domain.MarketTypeLinearPerp); err == nil {
+				out = append(out, domain.MarketDescriptor{
+					Exchange:       name,
+					RawSymbol:      toRaw(sym),
+					CanonSymbol:    sym,
+					BaseAsset:      sym.BaseAsset(),
+					QuoteAsset:     domain.QuoteAssetUSDT,
+					MarketType:     domain.MarketTypeLinearPerp,
+					Active:         true,
+					DiscoveredAtMs: nowMs,
+				})
+			}
+		}
+	}
+	return out
+}
+
+func SelectSynchronizedPollBatch(
+	match MatchResult,
+	minVolumeUSDT float64,
+	maxBases, cursor int,
+) (map[string][]domain.MarketDescriptor, int) {
+	if maxBases <= 0 || len(match.MatchedBaseAssets) <= maxBases {
+		return match.PollingTargets, 0
+	}
+	eligible := filterLiquidBases(match, minVolumeUSDT)
+	if len(eligible) <= maxBases {
+		return filterTargetsByBases(match.PollingTargets, eligible), 0
+	}
+	start := cursor % len(eligible)
+	batch := make([]string, 0, maxBases)
+	for i := 0; i < maxBases; i++ {
+		batch = append(batch, eligible[(start+i)%len(eligible)])
+	}
+	nextCursor := (start + maxBases) % len(eligible)
+	return filterTargetsByBases(match.PollingTargets, batch), nextCursor
+}
+
+func filterLiquidBases(match MatchResult, minVolumeUSDT float64) []string {
+	if minVolumeUSDT <= 0 {
+		return match.MatchedBaseAssets
+	}
+	volCount := make(map[string]int)
+	anyVolReported := false
+	for _, list := range match.PollingTargets {
+		for _, d := range list {
+			if d.Volume24hUSDT > 0 {
+				anyVolReported = true
+			}
+			if d.Volume24hUSDT >= minVolumeUSDT {
+				volCount[d.BaseAsset]++
+			}
+		}
+	}
+	if !anyVolReported {
+		return match.MatchedBaseAssets
+	}
+	var out []string
+	for _, b := range match.MatchedBaseAssets {
+		if volCount[b] >= 2 {
+			out = append(out, b)
+		}
+	}
+	if len(out) == 0 {
+		return match.MatchedBaseAssets
+	}
+	return out
+}
+
+func filterTargetsByBases(
+	targets map[string][]domain.MarketDescriptor,
+	bases []string,
+) map[string][]domain.MarketDescriptor {
+	keep := make(map[string]struct{}, len(bases))
+	for _, b := range bases {
+		keep[b] = struct{}{}
+	}
+	out := make(map[string][]domain.MarketDescriptor, len(targets))
+	for ex, list := range targets {
+		for _, d := range list {
+			if _, ok := keep[d.BaseAsset]; ok {
+				out[ex] = append(out[ex], d)
+			}
+		}
+	}
+	return out
+}
