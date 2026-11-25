@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import os
+import time
 import urllib.request
 from typing import Any, Callable, Dict, List, Optional
 
@@ -20,6 +21,7 @@ MARGIN_WARNING_THRESHOLD = 0.60
 MARGIN_CRITICAL_THRESHOLD = 0.75
 ADL_HIGH_RISK_THRESHOLD = 4
 EXIT_DATA_ALERT_INTERVAL_MS = 300_000
+POSITION_ALERT_INTERVAL_MS = 300_000
 REDIS_POSITIONS_KEY = "core:positions"
 PERP_SUFFIX = ":USDT"
 
@@ -81,6 +83,7 @@ class RiskWatchdog:
         self.adl_threshold = adl_threshold
         self.db_store = db_store
         self._exit_data_alerted_at: Dict[str, int] = {}
+        self._position_alerts: Dict[str, tuple[str, int]] = {}
 
     def _load_exit_profile_settings(self) -> Dict[str, Dict[str, Any]]:
         settings = {key: dict(value) for key, value in DEFAULT_PROFILE_EXIT_SETTINGS.items()}
@@ -136,43 +139,11 @@ class RiskWatchdog:
         drifts: List[Dict[str, Any]] = []
         unavailable: List[Dict[str, Any]] = []
         for pos in positions:
-            base_asset = pos.get("base_asset", "UNKNOWN")
-            try:
-                expected_qty = float(pos.get("qty", 0.0))
-            except (TypeError, ValueError, OverflowError):
-                expected_qty = math.nan
-            actual_a, issue_a = fetch_leg_qty(pos.get("leg_a", {}), self.exchanges)
-            actual_b, issue_b = fetch_leg_qty(pos.get("leg_b", {}), self.exchanges)
-            data_issues = self._build_position_data_issues(
-                pos, base_asset, expected_qty, actual_a, actual_b, issue_a, issue_b
-            )
-            if data_issues:
-                unavailable.append(data_issues)
-                self._report_position_data_issues(data_issues)
-                continue
-            actual_a = float(actual_a)
-            actual_b = float(actual_b)
-            leg_diff = abs(actual_a - actual_b)
-            if max(leg_diff, abs(actual_a - expected_qty), abs(actual_b - expected_qty)) > self.drift_tolerance:
-                drift_info = {
-                    "base_asset": base_asset,
-                    "expected_qty": expected_qty,
-                    "actual_qty_a": actual_a,
-                    "actual_qty_b": actual_b,
-                    "leg_drift": leg_diff,
-                    "leg_a_exchange": pos["leg_a"].get("exchange", "unknown"),
-                    "leg_a_symbol": leg_symbol(pos["leg_a"]),
-                    "leg_b_exchange": pos["leg_b"].get("exchange", "unknown"),
-                    "leg_b_symbol": leg_symbol(pos["leg_b"]),
-                }
-                drifts.append(drift_info)
-                self._record_risk("POSITION_DRIFT", "WARNING", drift_info)
-                self.notifier.send(
-                    f"[DRIFT] {base_asset}: {drift_info['leg_a_exchange']} "
-                    f"{drift_info['leg_a_symbol']}={actual_a}, "
-                    f"{drift_info['leg_b_exchange']} {drift_info['leg_b_symbol']}={actual_b}; "
-                    f"expected={expected_qty}, leg_drift={leg_diff}"
-                )
+            drift, data_issue = self._reconcile_position(pos)
+            if drift:
+                drifts.append(drift)
+            if data_issue:
+                unavailable.append(data_issue)
 
         if drifts:
             status = "DRIFT_DETECTED"
@@ -181,6 +152,77 @@ class RiskWatchdog:
         else:
             status = "OK"
         return {"status": status, "drifts": drifts, "unavailable": unavailable}
+
+    def _reconcile_position(
+        self, pos: Dict[str, Any]
+    ) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        base_asset = pos.get("base_asset", "UNKNOWN")
+        try:
+            expected_qty = float(pos.get("qty", 0.0))
+        except (TypeError, ValueError, OverflowError):
+            expected_qty = math.nan
+        actual_a, issue_a = fetch_leg_qty(pos.get("leg_a", {}), self.exchanges)
+        actual_b, issue_b = fetch_leg_qty(pos.get("leg_b", {}), self.exchanges)
+        data_issues = self._build_position_data_issues(
+            pos, base_asset, expected_qty, actual_a, actual_b, issue_a, issue_b
+        )
+        if data_issues:
+            if self._should_report_position_alert(base_asset, "POSITION_DATA_UNAVAILABLE", data_issues):
+                self._report_position_data_issues(data_issues)
+            return None, data_issues
+        actual_a = float(actual_a)
+        actual_b = float(actual_b)
+        leg_diff = abs(actual_a - actual_b)
+        drift = max(leg_diff, abs(actual_a - expected_qty), abs(actual_b - expected_qty))
+        if drift <= self.drift_tolerance:
+            self._position_alerts.pop(base_asset, None)
+            return None, None
+        drift_info = self._position_drift_details(pos, expected_qty, actual_a, actual_b, leg_diff)
+        if self._should_report_position_alert(base_asset, "POSITION_DRIFT", drift_info):
+            self._report_position_drift(drift_info)
+        return drift_info, None
+
+    def _position_drift_details(
+        self,
+        pos: Dict[str, Any],
+        expected_qty: float,
+        actual_a: float,
+        actual_b: float,
+        leg_diff: float,
+    ) -> Dict[str, Any]:
+        leg_a, leg_b = pos["leg_a"], pos["leg_b"]
+        return {
+            "base_asset": pos.get("base_asset", "UNKNOWN"),
+            "expected_qty": expected_qty,
+            "actual_qty_a": actual_a,
+            "actual_qty_b": actual_b,
+            "leg_drift": leg_diff,
+            "leg_a_exchange": leg_a.get("exchange", "unknown"),
+            "leg_a_symbol": leg_symbol(leg_a),
+            "leg_b_exchange": leg_b.get("exchange", "unknown"),
+            "leg_b_symbol": leg_symbol(leg_b),
+        }
+
+    def _report_position_drift(self, details: Dict[str, Any]) -> None:
+        self._record_risk("POSITION_DRIFT", "WARNING", details)
+        self.notifier.send(
+            f"[DRIFT] {details['base_asset']}: {details['leg_a_exchange']} "
+            f"{details['leg_a_symbol']}={details['actual_qty_a']}, "
+            f"{details['leg_b_exchange']} {details['leg_b_symbol']}={details['actual_qty_b']}; "
+            f"expected={details['expected_qty']}, leg_drift={details['leg_drift']}"
+        )
+
+    def _should_report_position_alert(
+        self, base_asset: str, event_type: str, details: Dict[str, Any]
+    ) -> bool:
+        now_ms = int(time.time() * 1000)
+        fingerprint = json.dumps({"event_type": event_type, "details": details}, sort_keys=True)
+        previous = self._position_alerts.get(base_asset)
+        if previous and previous[0] == fingerprint:
+            if now_ms - previous[1] < POSITION_ALERT_INTERVAL_MS:
+                return False
+        self._position_alerts[base_asset] = (fingerprint, now_ms)
+        return True
 
     def _build_position_data_issues(
         self,
@@ -391,8 +433,6 @@ class RiskWatchdog:
         max_hold_days: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
         """Auto-close positions on funding reversal, basis limits, or profile hold duration."""
-        import time
-
         curr_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
         exited: List[Dict[str, Any]] = []
         profile_settings = self._load_exit_profile_settings()

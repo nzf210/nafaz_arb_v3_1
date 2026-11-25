@@ -43,10 +43,12 @@ def test_perpetual_drift_does_not_fall_back_to_spot_wallet_balance():
     )
 
     result = watchdog.reconcile_positions([_position()])
+    watchdog.reconcile_positions([_position()])
 
     assert result["status"] == "DRIFT_DETECTED"
     assert result["drifts"][0]["actual_qty_a"] == 0
     assert result["drifts"][0]["leg_a_exchange"] == "okx"
+    assert sum("[DRIFT]" in message for message in watchdog.notifier.outbox) == 1
 
 
 def test_position_api_failure_is_reported_as_unavailable_not_as_zero_drift():
@@ -60,11 +62,13 @@ def test_position_api_failure_is_reported_as_unavailable_not_as_zero_drift():
     )
 
     result = watchdog.reconcile_positions([_position()])
+    watchdog.reconcile_positions([_position()])
 
     assert result["status"] == "DATA_UNAVAILABLE"
     assert result["drifts"] == []
     assert result["unavailable"][0]["issues"][0]["exchange"] == "okx"
     assert any("okx" in message and "DRIFT DATA UNAVAILABLE" in message for message in notifier.outbox)
+    assert sum("DRIFT DATA UNAVAILABLE" in message for message in notifier.outbox) == 1
     dashboard = format_risk_status(result)
     assert "Drift tidak dapat diverifikasi" in dashboard
     assert "okx" in dashboard
