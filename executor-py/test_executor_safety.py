@@ -227,3 +227,11 @@ def test_canary_min_lot_missing_credentials_and_okx_posside_fallback():
     assert "$10.00" in txt
     assert "insufficient_balance_leg_b (bybit)" in txt
 
+    # 5. Telegram /metrics formatter sorts descending, formats thousand separators, percentages, and labels
+    from telegram_formatters import format_rejection_metrics
+    metrics_txt = format_rejection_metrics({"low_volume": 250, "negative_gross": 750})
+    assert "Total Evaluasi Ditolak:</b> <code>1,000</code>" in metrics_txt
+    assert "Funding Gross &lt;= 0</b> (<code>negative_gross</code>): <b>750</b> kali (75.0%)" in metrics_txt
+    assert metrics_txt.index("negative_gross") < metrics_txt.index("low_volume")
+
+

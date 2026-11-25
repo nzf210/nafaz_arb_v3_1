@@ -155,6 +155,31 @@ func (e *MatrixEvaluator) buildSameCEXSpotPerp(
 	return out
 }
 
+const (
+	reasonStaleBook    = "stale_book"
+	reasonStaleFunding = "stale_funding"
+)
+
+func (e *MatrixEvaluator) shouldEvaluateRoute(routeKey string, stamp routeInputStamp, booksFresh bool) bool {
+	// ponytail: pointer equality dedupes idle round-robin snapshots; switch to monotonic store seq if snapshots are mutated in-place.
+	e.rejectionMu.Lock()
+	prev, seen := e.routeInputs[routeKey]
+	if seen && prev == stamp {
+		e.rejectionMu.Unlock()
+		return false
+	}
+	booksUnchanged := seen && prev.bookA == stamp.bookA && prev.bookB == stamp.bookB
+	e.routeInputs[routeKey] = stamp
+	e.rejectionMu.Unlock()
+	if !booksFresh {
+		if !booksUnchanged {
+			e.incRejection(reasonStaleBook)
+		}
+		return false
+	}
+	return true
+}
+
 func (e *MatrixEvaluator) validateSameCEXInputs(
 	base, cexName string,
 	bookSpot, bookPerp *domain.OrderBookSnapshot,
@@ -162,13 +187,18 @@ func (e *MatrixEvaluator) validateSameCEXInputs(
 	colSnap *domain.CollateralSnapshot,
 	nowMs int64,
 ) bool {
-	_ = cexName
-	if !e.isBookFresh(bookSpot, nowMs) || !e.isBookFresh(bookPerp, nowMs) {
-		e.incRejection("stale_book")
+	stamp := routeInputStamp{
+		bookA:      bookSpot,
+		bookB:      bookPerp,
+		fundingB:   fundingPerp,
+		collateral: colSnap,
+	}
+	booksFresh := e.isBookFresh(bookSpot, nowMs) && e.isBookFresh(bookPerp, nowMs)
+	if !e.shouldEvaluateRoute("same:"+cexName+":"+base, stamp, booksFresh) {
 		return false
 	}
 	if fundingPerp == nil || !e.isFundingFresh(fundingPerp, nowMs) {
-		e.incRejection("stale_funding")
+		e.incRejection(reasonStaleFunding)
 		return false
 	}
 	if colSnap == nil || !e.isCollateralFresh(colSnap, nowMs) {
@@ -218,14 +248,20 @@ func (e *MatrixEvaluator) tryPerpPerpPair(
 	if bookB == nil {
 		return routeCandidate{}, false
 	}
-	if !e.isBookFresh(bookA, nowMs) || !e.isBookFresh(bookB, nowMs) {
-		e.incRejection("stale_book")
-		return routeCandidate{}, false
-	}
 	fundingA := snap.fundings[cexA.Name][perpSym]
 	fundingB := snap.fundings[cexB.Name][perpSym]
+	stamp := routeInputStamp{
+		bookA:    bookA,
+		bookB:    bookB,
+		fundingA: fundingA,
+		fundingB: fundingB,
+	}
+	booksFresh := e.isBookFresh(bookA, nowMs) && e.isBookFresh(bookB, nowMs)
+	if !e.shouldEvaluateRoute("perp:"+cexA.Name+":"+cexB.Name+":"+base, stamp, booksFresh) {
+		return routeCandidate{}, false
+	}
 	if fundingA == nil || fundingB == nil || !e.isFundingFresh(fundingA, nowMs) || !e.isFundingFresh(fundingB, nowMs) {
-		e.incRejection("stale_funding")
+		e.incRejection(reasonStaleFunding)
 		return routeCandidate{}, false
 	}
 	return routeCandidate{
@@ -282,13 +318,18 @@ func (e *MatrixEvaluator) trySpotPerpPair(
 	if bookB == nil {
 		return routeCandidate{}, false
 	}
-	if !e.isBookFresh(bookA, nowMs) || !e.isBookFresh(bookB, nowMs) {
-		e.incRejection("stale_book")
+	fundingB := snap.fundings[cexB.Name][perpSym]
+	stamp := routeInputStamp{
+		bookA:    bookA,
+		bookB:    bookB,
+		fundingB: fundingB,
+	}
+	booksFresh := e.isBookFresh(bookA, nowMs) && e.isBookFresh(bookB, nowMs)
+	if !e.shouldEvaluateRoute("spotperp:"+cexA.Name+":"+cexB.Name+":"+base, stamp, booksFresh) {
 		return routeCandidate{}, false
 	}
-	fundingB := snap.fundings[cexB.Name][perpSym]
 	if fundingB == nil || !e.isFundingFresh(fundingB, nowMs) {
-		e.incRejection("stale_funding")
+		e.incRejection(reasonStaleFunding)
 		return routeCandidate{}, false
 	}
 	return routeCandidate{

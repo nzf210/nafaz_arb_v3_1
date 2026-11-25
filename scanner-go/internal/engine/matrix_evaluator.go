@@ -277,25 +277,46 @@ func ComputeMetrics(grossFunding24h, feeLegA, feeLegB, slipLegA, slipLegB, targe
 	}
 }
 
+type routeInputStamp struct {
+	bookA      *domain.OrderBookSnapshot
+	bookB      *domain.OrderBookSnapshot
+	fundingA   *domain.FundingSnapshot
+	fundingB   *domain.FundingSnapshot
+	collateral *domain.CollateralSnapshot
+}
+
 type MatrixEvaluator struct {
-	cfg            *domain.ScannerConfig
-	store          *StateStore
-	rejectionMu    sync.Mutex
-	rejectionStats map[string]int64
+	cfg               *domain.ScannerConfig
+	store             *StateStore
+	rejectionMu       sync.Mutex
+	rejectionStats    map[string]int64
+	pendingRejections map[string]int64
+	routeInputs       map[string]routeInputStamp
 }
 
 func NewMatrixEvaluator(cfg *domain.ScannerConfig, store *StateStore) *MatrixEvaluator {
 	return &MatrixEvaluator{
-		cfg:            cfg,
-		store:          store,
-		rejectionStats: make(map[string]int64),
+		cfg:               cfg,
+		store:             store,
+		rejectionStats:    make(map[string]int64),
+		pendingRejections: make(map[string]int64),
+		routeInputs:       make(map[string]routeInputStamp),
 	}
 }
 
 func (e *MatrixEvaluator) incRejection(reason string) {
 	e.rejectionMu.Lock()
 	e.rejectionStats[reason]++
+	e.pendingRejections[reason]++
 	e.rejectionMu.Unlock()
+}
+
+func (e *MatrixEvaluator) DrainRejectionStats() map[string]int64 {
+	e.rejectionMu.Lock()
+	defer e.rejectionMu.Unlock()
+	out := e.pendingRejections
+	e.pendingRejections = make(map[string]int64)
+	return out
 }
 
 func (e *MatrixEvaluator) RejectionStats() map[string]int64 {

@@ -156,7 +156,7 @@ class TelegramBot:
             {"command": "history", "description": "📜 10 riwayat transaksi selesai"},
             {"command": "latest", "description": "📋 10 sinyal peluang terakhir"},
             {"command": "pair", "description": "🔎 Cek koin (cth: /pair BTC)"},
-            {"command": "metrics", "description": "📊 Statistik evaluasi & rejeki"},
+            {"command": "metrics", "description": "📊 Statistik evaluasi & rejeksi"},
             {"command": "risk", "description": "🛡️ Status margin ratio & ADL"},
             {"command": "reconcile", "description": "🧾 Rekonsiliasi posisi 1:1"},
             {"command": "settings", "description": "⚙️ Parameter runtime aktif"},

@@ -95,6 +95,9 @@ func NewRunner(scannerCfg *domain.ScannerConfig, exchangesCfg *domain.ExchangesC
 		}
 	}
 
+	pub := sink.NewSignalPublisher(kv, scannerCfg.Engine)
+	_ = pub.ResetRejectionStats(context.Background())
+
 	return &Runner{
 		ScannerCfg:          scannerCfg,
 		ExchangesCfg:        exchangesCfg,
@@ -103,7 +106,7 @@ func NewRunner(scannerCfg *domain.ScannerConfig, exchangesCfg *domain.ExchangesC
 		MarketRegistry:      marketReg,
 		Store:               store,
 		Evaluator:           engine.NewMatrixEvaluator(scannerCfg, store),
-		Publisher:           sink.NewSignalPublisher(kv, scannerCfg.Engine),
+		Publisher:           pub,
 		lastDiscoveryPollMs: make(map[string]int64),
 		lastFundingPollMs:   make(map[string]int64),
 		lastCollatPollMs:    make(map[string]int64),
@@ -390,7 +393,7 @@ func (r *Runner) pollPerpSymbol(ctx context.Context, wg *sync.WaitGroup, exName 
 func (r *Runner) RunTick(ctx context.Context, nowMs int64) (int, error) {
 	signals := r.Evaluator.EvaluateTick(nowMs)
 	published, err := r.Publisher.PublishBatch(ctx, signals)
-	_ = r.Publisher.RecordRejectionStats(ctx, r.Evaluator.RejectionStats())
+	_ = r.Publisher.RecordRejectionStats(ctx, r.Evaluator.DrainRejectionStats())
 	return published, err
 }
 

@@ -368,4 +368,16 @@ func TestMatrixEvaluator_MultiProfileAndVWAPCacheSharing(t *testing.T) {
 			t.Fatalf("expected expires_at_ms %d, got %d", nowMs+2500, sig.ExpiresAtMs)
 		}
 	}
+
+	// First drain captures the 2 negative_gross rejections (one per profile for reverse direction)
+	delta1 := ev.DrainRejectionStats()
+	if delta1["negative_gross"] != 2 {
+		t.Fatalf("expected drained negative_gross=2, got %v", delta1)
+	}
+	// Calling EvaluateTick again with unchanged snapshots (and even after books age past 2500ms) must not inflate rejection stats
+	_ = ev.EvaluateTick(nowMs + 5000)
+	delta2 := ev.DrainRejectionStats()
+	if len(delta2) != 0 {
+		t.Fatalf("expected 0 new rejections on unchanged round-robin snapshots, got %v", delta2)
+	}
 }

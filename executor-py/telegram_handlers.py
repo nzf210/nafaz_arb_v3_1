@@ -74,13 +74,7 @@ def handle_pair(bot: Any, chat_id: int, user_id: int, args: List[str]) -> None:
 
 def handle_metrics(bot: Any, chat_id: int, user_id: int, args: List[str]) -> None:
     stats = bot.get_rejection_stats()
-    lines = ["📊 <b>Metrik Rejeksi & Evaluasi Scanner</b>\n"]
-    if stats:
-        for reason, count in stats.items():
-            lines.append(f"• <code>{html.escape(str(reason))}</code>: <b>{count}</b> kali")
-    else:
-        lines.append("<i>Belum ada statistik rejeki tercatat di Redis.</i>")
-    bot.send_message(chat_id, "\n".join(lines), reply_markup=tf.default_keyboard())
+    bot.send_message(chat_id, tf.format_rejection_metrics(stats), reply_markup=tf.default_keyboard())
 
 
 def handle_risk(bot: Any, chat_id: int, user_id: int, args: List[str]) -> None:

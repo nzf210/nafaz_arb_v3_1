@@ -137,7 +137,7 @@ def format_help() -> str:
         "• <code>/history</code> — Riwayat eksekusi selesai\n"
         "• <code>/latest</code> — Peluang dari scan terakhir\n"
         "• <code>/pair &lt;ASET&gt;</code> — Cek peluang koin tertentu (cth: /pair BTC)\n"
-        "• <code>/metrics</code> — Statistik rejeki & evaluasi\n\n"
+        "• <code>/metrics</code> — Statistik rejeksi & evaluasi\n\n"
         "<b>Perintah Operasional & Risiko:</b>\n"
         "• <code>/risk</code> — Peringatan margin ratio & ADL\n"
         "• <code>/reconcile [retry]</code> — Rekonsiliasi posisi 1:1\n"
@@ -263,6 +263,40 @@ def format_latest_signals(signals: List[Dict[str, Any]]) -> str:
             f"• Target: <code>${notional:.2f}</code> | Alasan: <i>{reason}</i>\n"
         )
     return "\n".join(lines).strip()
+
+
+REJECTION_REASON_LABELS: Dict[str, str] = {
+    "negative_gross": "Funding Gross <= 0",
+    "high_breakeven": "Breakeven Terlalu Lama",
+    "low_net_yield": "Net Yield di Bawah Minimum",
+    "low_volume": "Volume 24j Kurang",
+    "insufficient_depth": "Kedalaman Orderbook Kurang",
+    "high_basis_spread": "Spread Basis Terlalu Lebar",
+    "collateral_ratio_low": "Rasio Kolateral Rendah",
+    "stale_book": "Orderbook Kedaluwarsa",
+    "stale_funding": "Data Funding Kedaluwarsa",
+    "stale_collateral": "Data Kolateral Kedaluwarsa",
+}
+
+
+def format_rejection_metrics(stats: Dict[str, int]) -> str:
+    lines = ["📊 <b>Metrik Rejeksi & Evaluasi Scanner</b>\n"]
+    valid_items = sorted(
+        [(str(k), int(v)) for k, v in (stats or {}).items() if int(v) > 0],
+        key=lambda kv: kv[1],
+        reverse=True,
+    )
+    total = sum(v for _, v in valid_items)
+    if not valid_items or total <= 0:
+        lines.append("<i>Belum ada statistik rejeksi tercatat di Redis.</i>")
+        return "\n".join(lines)
+    lines.append(f"• <b>Total Evaluasi Ditolak:</b> <code>{total:,}</code> kali\n")
+    for reason, count in valid_items:
+        label = html.escape(REJECTION_REASON_LABELS.get(reason, reason))
+        code = html.escape(reason)
+        pct = (count / total) * 100.0
+        lines.append(f"• <b>{label}</b> (<code>{code}</code>): <b>{count:,}</b> kali ({pct:.1f}%)")
+    return "\n".join(lines)
 
 
 def format_risk_status(risk_data: Dict[str, Any]) -> str:

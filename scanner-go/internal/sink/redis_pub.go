@@ -20,10 +20,11 @@ var ErrKeyNotFound = errors.New("key not found")
 
 type KVStore interface {
 	Get(ctx context.Context, key string) (string, error)
-	SetTTL(ctx context.Context, key string, value string, ttl time.Duration) error
-	Publish(ctx context.Context, channel string, payload string) error
+	SetTTL(ctx context.Context, key, value string, ttl time.Duration) error
+	Del(ctx context.Context, key string) error
+	Publish(ctx context.Context, channel, payload string) error
 	HSet(ctx context.Context, key string, fields map[string]string) error
-	HIncrBy(ctx context.Context, key string, field string, delta int64) (int64, error)
+	HIncrBy(ctx context.Context, key, field string, delta int64) (int64, error)
 }
 
 type memEntry struct {
@@ -71,7 +72,7 @@ func (m *MemoryKVStore) Get(_ context.Context, key string) (string, error) {
 	return entry.value, nil
 }
 
-func (m *MemoryKVStore) SetTTL(_ context.Context, key string, value string, ttl time.Duration) error {
+func (m *MemoryKVStore) SetTTL(_ context.Context, key, value string, ttl time.Duration) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var exp time.Time
@@ -82,7 +83,15 @@ func (m *MemoryKVStore) SetTTL(_ context.Context, key string, value string, ttl 
 	return nil
 }
 
-func (m *MemoryKVStore) Publish(_ context.Context, channel string, payload string) error {
+func (m *MemoryKVStore) Del(_ context.Context, key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.kv, key)
+	delete(m.hashes, key)
+	return nil
+}
+
+func (m *MemoryKVStore) Publish(_ context.Context, channel, payload string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.published[channel] = append(m.published[channel], payload)
@@ -101,7 +110,7 @@ func (m *MemoryKVStore) HSet(_ context.Context, key string, fields map[string]st
 	return nil
 }
 
-func (m *MemoryKVStore) HIncrBy(_ context.Context, key string, field string, delta int64) (int64, error) {
+func (m *MemoryKVStore) HIncrBy(_ context.Context, key, field string, delta int64) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.hashes[key]; !ok {
@@ -220,7 +229,7 @@ func (c *RESPClient) Get(ctx context.Context, key string) (string, error) {
 	return str, nil
 }
 
-func (c *RESPClient) SetTTL(ctx context.Context, key string, value string, ttl time.Duration) error {
+func (c *RESPClient) SetTTL(ctx context.Context, key, value string, ttl time.Duration) error {
 	ms := ttl.Milliseconds()
 	if ms <= 0 {
 		_, _, _, err := c.execCommand(ctx, "SET", key, value)
@@ -230,7 +239,12 @@ func (c *RESPClient) SetTTL(ctx context.Context, key string, value string, ttl t
 	return err
 }
 
-func (c *RESPClient) Publish(ctx context.Context, channel string, payload string) error {
+func (c *RESPClient) Del(ctx context.Context, key string) error {
+	_, _, _, err := c.execCommand(ctx, "DEL", key)
+	return err
+}
+
+func (c *RESPClient) Publish(ctx context.Context, channel, payload string) error {
 	_, _, _, err := c.execCommand(ctx, "PUBLISH", channel, payload)
 	return err
 }
@@ -248,7 +262,7 @@ func (c *RESPClient) HSet(ctx context.Context, key string, fields map[string]str
 	return err
 }
 
-func (c *RESPClient) HIncrBy(ctx context.Context, key string, field string, delta int64) (int64, error) {
+func (c *RESPClient) HIncrBy(ctx context.Context, key, field string, delta int64) (int64, error) {
 	_, val, _, err := c.execCommand(ctx, "HINCRBY", key, field, strconv.FormatInt(delta, 10))
 	return val, err
 }
@@ -333,7 +347,7 @@ func (p *SignalPublisher) PublishBatch(ctx context.Context, signals []domain.Sig
 	return published, nil
 }
 
-func (p *SignalPublisher) UpdateExchangeHealth(ctx context.Context, cex string, status string, lastPingMs int64, activeSymbols int, http429Count int) error {
+func (p *SignalPublisher) UpdateExchangeHealth(ctx context.Context, cex, status string, lastPingMs int64, activeSymbols, http429Count int) error {
 	key := domain.KeyPrefixMetaExchange + cex
 	fields := map[string]string{
 		"status":               status,
@@ -355,6 +369,10 @@ func (p *SignalPublisher) UpdateCollateralSnapshot(ctx context.Context, snap *do
 		fields[asset] = strconv.FormatFloat(ratio, 'f', 4, 64)
 	}
 	return p.store.HSet(ctx, key, fields)
+}
+
+func (p *SignalPublisher) ResetRejectionStats(ctx context.Context) error {
+	return p.store.Del(ctx, domain.KeyMetaRejectionStats)
 }
 
 func (p *SignalPublisher) RecordRejectionStats(ctx context.Context, stats map[string]int64) error {
