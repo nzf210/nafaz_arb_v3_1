@@ -38,14 +38,11 @@ services:
       context: .
       dockerfile: Containerfile.scanner
     container_name: nafaz_scanner
-    dns:
-      - 10.88.0.1
-      - 208.67.222.222
-      - 208.67.220.220
+    network_mode: host
     env_file:
       - .env
     environment:
-      REDIS_ADDR: ${REDIS_ADDR:-nafaz_redis:6379}
+      REDIS_ADDR: ${REDIS_ADDR:-127.0.0.1:6379}
       DRY_RUN: ${DRY_RUN:-true}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
       HTTP_PROXY: ${HTTP_PROXY:-}
