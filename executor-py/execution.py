@@ -1,6 +1,7 @@
 """Delta-neutral 1:1 execution, CEX guardrails, partial-fill handling, and route unwind."""
 
 from decimal import Decimal, ROUND_CEILING, ROUND_DOWN
+import html
 import logging
 import time
 from typing import Any, Callable, Dict, Optional
@@ -237,7 +238,9 @@ class DeltaNeutralExecutor:
                 ord_price = self._leg_b_order_price(ord_type, side_b, sym_b, price_b)
                 ord_amt_b, ct_size_b = self._to_order_amount(ex_b, sym_b, remaining_b)
                 order_b = self._submit_entry_order(client_b, sym_b, ord_type, side_b, ord_amt_b, ord_price)
-                step_fill, _ = self._resolve_filled_base(client_b, sym_b, order_b, ord_amt_b, ct_size_b)
+                step_fill, order_status = self._resolve_filled_base(client_b, sym_b, order_b, ord_amt_b, ct_size_b)
+                if step_fill < remaining_b:
+                    last_error = f"{ord_type} order status={order_status}, filled={step_fill}/{remaining_b}"
                 if step_fill < remaining_b and order_b.get("id"):
                     self._try_cancel(client_b, order_b["id"], sym_b)
                 filled_b = float(_to_dec(filled_b) + _to_dec(step_fill))
@@ -245,7 +248,7 @@ class DeltaNeutralExecutor:
                     break
             except Exception as exc:
                 last_error = str(exc)
-                logger.warning("Leg B attempt %d failed: %s", attempt + 1, exc)
+                logger.warning("Leg B attempt %d on %s (%s) failed: %s", attempt + 1, ex_b, sym_b, exc)
         return filled_b, order_b, last_error
 
     def _try_cancel(self, client: Any, order_id: str, symbol: str) -> None:
@@ -368,9 +371,17 @@ class DeltaNeutralExecutor:
         qty: float, filled_a: float, filled_b: float, unhedged_a: float,
         cancelled_unfilled_a: bool, last_error: Optional[str],
     ) -> Dict[str, Any]:
+        leg_b = signal["legs"]["leg_b"]
+        ex_b = leg_b["exchange"]
+        sym_b = leg_b.get("canon_symbol") or leg_b["raw_symbol"]
         unwind_order = self._emergency_unwind(ex_a, client_a, sym_a, side_a, unhedged_a)
         if self.notifier:
-            self.notifier(f"[ALERT] Emergency unwind on {sym_a} ({ex_a}): unhedged={unhedged_a}")
+            reason = html.escape((last_error or "order returned without full fill")[:250])
+            self.notifier(
+                f"[ALERT] Emergency unwind: {sym_a} ({ex_a}); hedge failed on "
+                f"{sym_b} ({ex_b}); filled={filled_b}/{filled_a}; "
+                f"unhedged={unhedged_a}; reason={reason}"
+            )
         status = "EMERGENCY_UNWOUND" if filled_b == 0 else "PARTIAL_HEDGED_AND_UNWOUND"
         return {
             "status": status,
@@ -381,6 +392,8 @@ class DeltaNeutralExecutor:
             "unwound_qty_a": unhedged_a,
             "cancelled_unfilled_a": cancelled_unfilled_a,
             "unwind_order": unwind_order,
+            "leg_b_exchange": ex_b,
+            "leg_b_symbol": sym_b,
             "error": last_error,
         }
 
