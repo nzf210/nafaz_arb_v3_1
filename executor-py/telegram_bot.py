@@ -431,7 +431,7 @@ class TelegramBot:
                         self.last_offset = up_id + 1
                     self._handle_update(u)
             except Exception as exc:
-                logger.debug("Telegram getUpdates exception: %s", exc)
+                logger.warning("Telegram getUpdates polling error: %s", exc)
                 time.sleep(3)
 
     def _get_updates(self, offset: int) -> List[Dict[str, Any]]:
