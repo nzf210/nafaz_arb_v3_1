@@ -38,11 +38,47 @@ func TestSymbolMapping(t *testing.T) {
 			t.Fatalf("perp ToRawSymbol(%q) = %q", perpCanon, a.ToRawSymbol(perpCanon))
 		}
 	}
+
+	if _, err := a.NormalizeSymbol("BTC-26DEC25", domain.MarketTypeLinearPerp); err == nil {
+		t.Fatal("expected dated futures symbol with hyphen to be rejected by Bybit NormalizeSymbol")
+	}
 }
 
-func TestFetchEndpointsAnd429Retry(t *testing.T) {
-	var hits atomic.Int32
+func TestFetchMarketsBybit(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("category") {
+		case "spot":
+			_, _ = w.Write([]byte(`{"retCode":0,"result":{"list":[
+				{"symbol":"BTCUSDT","baseCoin":"BTC","quoteCoin":"USDT","status":"Trading"},
+				{"symbol":"HALTUSDT","baseCoin":"HALT","quoteCoin":"USDT","status":"Closed"}
+			]}}`))
+		case "linear":
+			_, _ = w.Write([]byte(`{"retCode":0,"result":{"list":[
+				{"symbol":"BTCUSDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT","contractType":"LinearPerpetual","status":"Trading"},
+				{"symbol":"XYZUSDT","baseCoin":"XYZ","quoteCoin":"USDT","settleCoin":"USDT","contractType":"LinearPerpetual","status":"Trading"},
+				{"symbol":"BTC-26DEC25","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT","contractType":"LinearFutures","status":"Trading"}
+			]}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	a, err := NewAdapter(domain.ExchangeConfig{BaseURL: srv.URL, RateLimitRPS: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	markets, err := a.FetchMarkets(context.Background())
+	if err != nil {
+		t.Fatalf("FetchMarkets failed: %v", err)
+	}
+	if len(markets) != 3 {
+		t.Fatalf("expected 3 active Bybit markets (1 spot + 2 linear perp), got %d: %+v", len(markets), markets)
+	}
+}
+
+func mockBybitHandler(hits *atomic.Int32) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		if hits.Add(1) == 1 {
 			w.WriteHeader(http.StatusTooManyRequests)
 			return
@@ -61,7 +97,12 @@ func TestFetchEndpointsAnd429Retry(t *testing.T) {
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
-	}))
+	}
+}
+
+func TestFetchEndpointsAnd429Retry(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(mockBybitHandler(&hits))
 	defer srv.Close()
 
 	a, err := NewAdapter(domain.ExchangeConfig{

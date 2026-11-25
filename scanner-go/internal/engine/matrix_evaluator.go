@@ -32,6 +32,7 @@ type VWAPResult struct {
 
 type StateStore struct {
 	mu          sync.RWMutex
+	registry    *MarketRegistry
 	exchanges   map[string]ExchangeMeta
 	books       map[string]map[domain.CanonSymbol]*domain.OrderBookSnapshot
 	fundings    map[string]map[domain.CanonSymbol]*domain.FundingSnapshot
@@ -44,6 +45,62 @@ func NewStateStore() *StateStore {
 		books:       make(map[string]map[domain.CanonSymbol]*domain.OrderBookSnapshot),
 		fundings:    make(map[string]map[domain.CanonSymbol]*domain.FundingSnapshot),
 		collaterals: make(map[string]*domain.CollateralSnapshot),
+	}
+}
+
+func (s *StateStore) SetMarketRegistry(reg *MarketRegistry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.registry = reg
+}
+
+func (s *StateStore) MarketRegistry() *MarketRegistry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.registry
+}
+
+func (s *StateStore) AllExchanges() []ExchangeMeta {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]ExchangeMeta, 0, len(s.exchanges))
+	for _, meta := range s.exchanges {
+		out = append(out, meta)
+	}
+	return out
+}
+
+func (s *StateStore) RemoveMarket(exchange string, sym domain.CanonSymbol) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if bySym, ok := s.books[exchange]; ok {
+		delete(bySym, sym)
+	}
+	if bySym, ok := s.fundings[exchange]; ok {
+		delete(bySym, sym)
+	}
+}
+
+func (s *StateStore) RetainExchangeMarkets(exchange string, active []domain.MarketDescriptor) {
+	keep := make(map[domain.CanonSymbol]struct{}, len(active))
+	for _, desc := range active {
+		keep[desc.CanonSymbol] = struct{}{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if bySym, ok := s.books[exchange]; ok {
+		for sym := range bySym {
+			if _, ok := keep[sym]; !ok {
+				delete(bySym, sym)
+			}
+		}
+	}
+	if bySym, ok := s.fundings[exchange]; ok {
+		for sym := range bySym {
+			if _, ok := keep[sym]; !ok {
+				delete(bySym, sym)
+			}
+		}
 	}
 }
 

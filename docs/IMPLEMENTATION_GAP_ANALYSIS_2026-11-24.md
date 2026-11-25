@@ -1,4 +1,52 @@
-# NAFAZ ARB V3.1 — Implementation Gap Analysis & Execution Plan
+# NAFAZ ARB V3.1 — Implementation Gap Analysis, Repository Audit & Execution Plan
+
+## Phase 1 — Complete Repository Audit Report (2026-11-25)
+
+**Audit date:** 2026-11-25
+**Audited source ref:** `master` (`d7ec339`)
+**Working branch:** `feat/dynamic-market-discovery`
+**Implementation status:** Automatic Market Discovery, Strict Symbol Normalization, Cross-CEX Matching (`MarketRegistry`), and Dynamic Bounded Polling implemented and verified via automated Go & Python test suites.
+
+### 1.1 Audited Repository Structure & Component Status
+
+| Component / Path | Audited Role | Baseline Implementation Reality (`master`) | Gap / Discrepancy Identified |
+| :--- | :--- | :--- | :--- |
+| `configs/exchanges.yaml` | Exchange endpoints, fees, rate limits, symbol selection | Hardcodes `symbol_allowlist: ["BTC", "ETH", "SOL"]` for `okx`, `bybit`, and `mexc`. | Forces manual pair listing; lacks `market_discovery` block (`enabled`, `markets`, `quote_assets`, `refresh_interval_sec`, `blocklist`, optional `allowlist`). |
+| `configs/scanner.base.yaml` | Engine tick, freshness thresholds, route policies, profiles | Configures `tick_interval_ms: 1000`, `freshness`, `route_policies`, and 2 evaluation profiles. | Matches V3.1 engine specification; no discrepancy in math/profile parameters. |
+| `docs/PRD_v3_1.md` & `prd_dan_roadmap_nafaz_arb_v3_1.md` | Product Requirements Document | `prd_dan_roadmap_nafaz_arb_v3_1.md` is an older duplicate out of sync with `docs/PRD_v3_1.md`. Neither contains complete specs for Automatic Market Discovery, Canonical Symbol Normalization rules, Cross-CEX Matching rules, or Dynamic Polling lifecycle. | Both PRD files must be unified and expanded with explicit specs for Automatic Market Discovery, Symbol Normalization, Cross-CEX Matching, Config Reference, and Data Flow. |
+| `README.md` | Architecture & operator guide | Steps 1 & 3 instruct operators to configure `symbol_allowlist: ["BTC", "ETH", "SOL"]` and omit `FetchMarkets` from `ExchangeAdapter`. | Contradicts automatic market discovery architecture; must document the 9-stage discovery-to-publisher flow and current implementation status. |
+| `scanner-go/internal/domain/types.go` | Canonical symbols, snapshots, signal payload, config structs | Defines `CanonSymbol` (`BASE/USDT`, `BASE/USDT:USDT`), `OrderBookSnapshot`, `FundingSnapshot`, `CollateralSnapshot`, `SignalPayload`, `ExchangeConfig`. | Missing `MarketDescriptor` domain model, `MarketDiscoveryConfig` struct, and structured `(base, quote, marketType)` normalization helper. |
+| `scanner-go/internal/adapter/contract.go` | `ExchangeAdapter` interface & dynamic `Registry` | Defines `Name`, `Capabilities`, `FetchOrderBook`, `FetchFundingRate`, `FetchCollateralRatio`, `NormalizeSymbol`, `ToRawSymbol`. | Missing `FetchMarkets(ctx context.Context) ([]domain.MarketDescriptor, error)` in `ExchangeAdapter`. |
+| `scanner-go/internal/adapter/okx/okx.go` | OKX v5 REST adapter | Fetches orderbook (`/api/v5/market/books`), funding (`/api/v5/public/funding-rate`), collateral (`/api/v5/public/discount-rate-interest-free-quota`), and lazy `ctVal`. | Missing `FetchMarkets` via `/api/v5/public/instruments?instType=SPOT` & `instType=SWAP`. Also `NormalizeSymbol` accepts `-USDT` (Spot suffix) when `marketType == MarketTypeLinearPerp`, risking Spot/Perp confusion. |
+| `scanner-go/internal/adapter/bybit/bybit.go` | Bybit v5 REST adapter | Fetches orderbook (`/v5/market/orderbook`), funding (`/v5/market/tickers`), collateral (`/v5/account/collateral-info`). | Missing `FetchMarkets` via `/v5/market/instruments-info?category=spot` & `category=linear`. |
+| `scanner-go/internal/adapter/mexc/mexc.go` | MEXC Spot v3 & Contract v1 REST adapter | Fetches orderbook (`/api/v3/depth` & `/api/v1/contract/depth/{sym}`), funding (`/api/v1/contract/funding_rate/{sym}`). | Missing `FetchMarkets` via `/api/v3/exchangeInfo` (Spot) and `/api/v1/contract/detail` (Linear Perp). Also `NormalizeSymbol` allows `BTC_USDT` (Perp format) in Spot and `BTCUSDT` (Spot format) in Perp. |
+| `scanner-go/internal/adapter/resilience/resilience.go` | Token-bucket rate limiter, backoff+jitter, circuit breaker | Working token-bucket `RateLimiter`, `CircuitBreaker`, `Client.GetJSON`, and `PollingInterval`. | Solid foundation; keep intact and reuse for discovery and polling calls. |
+| `scanner-go/internal/engine/matrix_evaluator.go` & `route_builder.go` | `StateStore`, VWAP, funding normalization, auto-route matrix, multi-profile evaluator | Evaluates `spot_perp_same_cex`, `perp_perp_cross_cex`, and `spot_perp_cross_cex` from `StateStore.books` and `StateStore.fundings`. | `StateStore` lacks market eviction (`RemoveMarket` / `RetainMarkets`) when markets delist or become inactive. Route building scans all books in store rather than an explicitly matched active market universe. |
+| `scanner-go/cmd/scanner/main.go` | Runner orchestration & polling loop | `scheduleExchangePoll` loops over `exCfg.SymbolAllowlist`, spawns unbounded goroutines, and marks exchange `"healthy"` unconditionally. | No automatic market discovery, no `MarketRegistry`, no Cross-CEX matcher, no periodic discovery refresh, no delisting cleanup, no bounded polling concurrency, and no duplicate-task guard. |
+| `scanner-go/internal/sink/redis_pub.go` | Signal deduplicator & Redis publisher (`core:*`, `meta:*`) | Working v3.1 signal validation, cooldown deduplication with `MinYieldDelta` override, and `meta:*` health/rejection hashes. | Preserve existing V3.1 behavior. |
+
+### 1.2 Files Identified for Modification / Creation
+
+1. **PRD & Documentation (Phase 2 & Phase 3)**:
+   - `docs/IMPLEMENTATION_GAP_ANALYSIS_2026-11-24.md`
+   - `docs/PRD_v3_1.md`
+   - `prd_dan_roadmap_nafaz_arb_v3_1.md`
+   - `README.md`
+2. **Configuration (Phase 4)**:
+   - `configs/exchanges.yaml`
+3. **Go Scanner Source Code & Tests (Phase 5, 6, 7)**:
+   - `scanner-go/internal/domain/types.go` & `scanner-go/internal/domain/types_test.go`
+   - `scanner-go/internal/adapter/contract.go` & `scanner-go/internal/adapter/contract_test.go`
+   - `scanner-go/internal/adapter/okx/okx.go` & `scanner-go/internal/adapter/okx/okx_test.go`
+   - `scanner-go/internal/adapter/bybit/bybit.go` & `scanner-go/internal/adapter/bybit/bybit_test.go`
+   - `scanner-go/internal/adapter/mexc/mexc.go` & `scanner-go/internal/adapter/mexc/mexc_test.go`
+   - `scanner-go/internal/engine/market_registry.go` & `scanner-go/internal/engine/market_registry_test.go`
+   - `scanner-go/internal/engine/matrix_evaluator.go`, `scanner-go/internal/engine/route_builder.go`, & `scanner-go/internal/engine/matrix_evaluator_test.go`
+   - `scanner-go/cmd/scanner/main.go` & `scanner-go/cmd/scanner/main_test.go`
+
+---
+
+## Prior Static Audit Baseline (2026-11-24)
 
 **Audit date:** 2026-11-24  
 **Audited source ref:** `master` at the time of audit  

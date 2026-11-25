@@ -160,4 +160,61 @@ func TestLoadConfigs(t *testing.T) {
 	if scEnvCfg.Engine.RedisAddr != "redis:6379" || scEnvCfg.Engine.DryRun != false {
 		t.Fatalf("expected env override redis:6379 & dry_run=false, got %+v", scEnvCfg.Engine)
 	}
+
+	for _, name := range []string{"okx", "bybit", "mexc"} {
+		md := exCfg.Exchanges[name].EffectiveDiscoveryConfig()
+		if !md.Enabled {
+			t.Fatalf("expected market_discovery.enabled=true for %q", name)
+		}
+		if len(exCfg.Exchanges[name].SymbolAllowlist) != 0 {
+			t.Fatalf("expected empty symbol_allowlist in exchanges.yaml for %q, got %v", name, exCfg.Exchanges[name].SymbolAllowlist)
+		}
+	}
 }
+
+func TestMarketDescriptorAndDiscoveryFilter(t *testing.T) {
+	if _, err := NormalizeMarketSymbol("BTC", "USDC", MarketTypeSpot); err == nil {
+		t.Fatal("expected non-USDT quote asset to be rejected")
+	}
+
+	desc := MarketDescriptor{
+		Exchange:    "okx",
+		RawSymbol:   "PEPE-USDT-SWAP",
+		CanonSymbol: "PEPE/USDT:USDT",
+		BaseAsset:   "PEPE",
+		QuoteAsset:  "USDT",
+		MarketType:  MarketTypeLinearPerp,
+		Active:      true,
+	}
+	if err := desc.Validate(); err != nil {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+
+	// Spot descriptor masquerading with Perp CanonSymbol must fail validation
+	mismatch := desc
+	mismatch.MarketType = MarketTypeSpot
+	if err := mismatch.Validate(); err == nil {
+		t.Fatal("expected validation failure when MarketType does not match CanonSymbol")
+	}
+
+	cfg := ExchangeConfig{
+		MarketDiscovery: MarketDiscoveryConfig{
+			Enabled:     true,
+			Markets:     []string{"spot", "linear_perpetual"},
+			QuoteAssets: []string{"USDT"},
+			Blocklist:   []string{"LUNA"},
+		},
+	}
+	if !cfg.AllowsMarket(desc) {
+		t.Fatal("expected active PEPE linear_perp market to be allowed")
+	}
+
+	blocked := desc
+	blocked.BaseAsset = "LUNA"
+	blocked.CanonSymbol = "LUNA/USDT:USDT"
+	blocked.RawSymbol = "LUNA-USDT-SWAP"
+	if cfg.AllowsMarket(blocked) {
+		t.Fatal("expected blocklisted LUNA market to be rejected")
+	}
+}
+

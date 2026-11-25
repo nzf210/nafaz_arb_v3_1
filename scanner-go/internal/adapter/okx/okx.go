@@ -70,17 +70,13 @@ func (a *Adapter) NormalizeSymbol(raw string, marketType domain.MarketType) (dom
 	case domain.MarketTypeLinearPerp:
 		if strings.HasSuffix(s, okxSwapSuffix) {
 			base := strings.TrimSuffix(s, okxSwapSuffix)
-			return domain.NewCanonSymbol(base, domain.MarketTypeLinearPerp)
-		}
-		if strings.HasSuffix(s, okxSpotSuffix) {
-			base := strings.TrimSuffix(s, okxSpotSuffix)
-			return domain.NewCanonSymbol(base, domain.MarketTypeLinearPerp)
+			return domain.NormalizeMarketSymbol(base, domain.QuoteAssetUSDT, domain.MarketTypeLinearPerp)
 		}
 		return "", fmt.Errorf("okx: unsupported linear_perp raw symbol %q", raw)
 	case domain.MarketTypeSpot:
-		if strings.HasSuffix(s, okxSpotSuffix) {
+		if strings.HasSuffix(s, okxSpotSuffix) && !strings.HasSuffix(s, okxSwapSuffix) {
 			base := strings.TrimSuffix(s, okxSpotSuffix)
-			return domain.NewCanonSymbol(base, domain.MarketTypeSpot)
+			return domain.NormalizeMarketSymbol(base, domain.QuoteAssetUSDT, domain.MarketTypeSpot)
 		}
 		return "", fmt.Errorf("okx: unsupported spot raw symbol %q", raw)
 	default:

@@ -31,83 +31,92 @@ func TestRegistryAndAdapterContracts(t *testing.T) {
 	}
 
 	for _, name := range wantNames {
-		var attempts atomic.Int32
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if attempts.Add(1) == 1 {
-				w.WriteHeader(http.StatusTooManyRequests)
-				return
+		verifySingleAdapterContract(t, reg, name)
+	}
+}
+
+func newContractTestServer(attempts *atomic.Int32) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_, _ = w.Write([]byte(`{
+			"bids": [{"price": 60000, "quantity": 1.5}],
+			"asks": [{"price": 60010, "quantity": 1.5}],
+			"volume_24h_usdt": 10000000,
+			"funding_rate": 0.0004,
+			"interval_hours": 8,
+			"next_settlement_ms": 1700028800000,
+			"timestamp_ms": 1700000000000,
+			"asset_ratios": {"USDT": 1.0, "BTC": 0.95}
+		}`))
+	}))
+}
+
+func verifySingleAdapterContract(t *testing.T, reg *adapter.Registry, name string) {
+	t.Helper()
+	var attempts atomic.Int32
+	srv := newContractTestServer(&attempts)
+	defer srv.Close()
+
+	ad, err := reg.Create(name, domain.ExchangeConfig{
+		Enabled:       true,
+		BaseURL:       srv.URL,
+		RateLimitRPS:  50,
+		MaxRetries:    2,
+		UnifiedMargin: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(%q) failed: %v", name, err)
+	}
+	if ad.Name() != name {
+		t.Fatalf("Name() = %q, want %q", ad.Name(), name)
+	}
+
+	verifyAdapterSymbolRoundtrip(t, ad, name)
+	verifyAdapterEndpoints(t, ad, name)
+}
+
+func verifyAdapterSymbolRoundtrip(t *testing.T, ad adapter.ExchangeAdapter, name string) {
+	t.Helper()
+	for _, base := range []string{"BTC", "ETH", "SOL"} {
+		for _, mt := range []domain.MarketType{domain.MarketTypeSpot, domain.MarketTypeLinearPerp} {
+			canon, err := domain.NewCanonSymbol(base, mt)
+			if err != nil {
+				t.Fatal(err)
 			}
-			// Return canonical fallback JSON understood by all adapters
-			_, _ = w.Write([]byte(`{
-				"bids": [{"price": 60000, "quantity": 1.5}],
-				"asks": [{"price": 60010, "quantity": 1.5}],
-				"volume_24h_usdt": 10000000,
-				"funding_rate": 0.0004,
-				"interval_hours": 8,
-				"next_settlement_ms": 1700028800000,
-				"timestamp_ms": 1700000000000,
-				"asset_ratios": {"USDT": 1.0, "BTC": 0.95}
-			}`))
-		}))
-		defer srv.Close()
-
-		ad, err := reg.Create(name, domain.ExchangeConfig{
-			Enabled:       true,
-			BaseURL:       srv.URL,
-			RateLimitRPS:  50,
-			MaxRetries:    2,
-			UnifiedMargin: true,
-		})
-		if err != nil {
-			t.Fatalf("Create(%q) failed: %v", name, err)
-		}
-		if ad.Name() != name {
-			t.Fatalf("Name() = %q, want %q", ad.Name(), name)
-		}
-
-		// Two-way symbol roundtrip for BTC, ETH, SOL across Spot & Linear Perp
-		for _, base := range []string{"BTC", "ETH", "SOL"} {
-			for _, mt := range []domain.MarketType{domain.MarketTypeSpot, domain.MarketTypeLinearPerp} {
-				canon, err := domain.NewCanonSymbol(base, mt)
-				if err != nil {
-					t.Fatal(err)
-				}
-				raw := ad.ToRawSymbol(canon)
-				if raw == "" {
-					t.Fatalf("%s: empty raw symbol for %s", name, canon)
-				}
-				roundtrip, err := ad.NormalizeSymbol(raw, mt)
-				if err != nil {
-					t.Fatalf("%s: NormalizeSymbol(%q, %q) failed: %v", name, raw, mt, err)
-				}
-				if roundtrip != canon {
-					t.Fatalf("%s: roundtrip %q -> %q != %q", name, raw, roundtrip, canon)
-				}
+			raw := ad.ToRawSymbol(canon)
+			if raw == "" {
+				t.Fatalf("%s: empty raw symbol for %s", name, canon)
+			}
+			roundtrip, err := ad.NormalizeSymbol(raw, mt)
+			if err != nil || roundtrip != canon {
+				t.Fatalf("%s: roundtrip %q -> %q (err=%v) != %q", name, raw, roundtrip, err, canon)
 			}
 		}
+	}
+}
 
-		ob, err := ad.FetchOrderBook(context.Background(), "BTC/USDT:USDT")
-		if err != nil {
-			t.Fatalf("%s FetchOrderBook failed: %v", name, err)
-		}
-		if ob.Exchange != name || len(ob.Bids) == 0 {
-			t.Fatalf("%s invalid orderbook: %+v", name, ob)
-		}
+func verifyAdapterEndpoints(t *testing.T, ad adapter.ExchangeAdapter, name string) {
+	t.Helper()
+	ob, err := ad.FetchOrderBook(context.Background(), "BTC/USDT:USDT")
+	if err != nil || ob.Exchange != name || len(ob.Bids) == 0 {
+		t.Fatalf("%s invalid orderbook: %+v err=%v", name, ob, err)
+	}
 
-		fr, err := ad.FetchFundingRate(context.Background(), "BTC/USDT:USDT")
-		if err != nil {
-			t.Fatalf("%s FetchFundingRate failed: %v", name, err)
-		}
-		if fr.IntervalHours <= 0 {
-			t.Fatalf("%s expected IntervalHours > 0, got %d", name, fr.IntervalHours)
-		}
+	fr, err := ad.FetchFundingRate(context.Background(), "BTC/USDT:USDT")
+	if err != nil || fr.IntervalHours <= 0 {
+		t.Fatalf("%s invalid funding rate: %+v err=%v", name, fr, err)
+	}
 
-		col, err := ad.FetchCollateralRatio(context.Background())
-		if err != nil {
-			t.Fatalf("%s FetchCollateralRatio failed: %v", name, err)
-		}
-		if col.Exchange != name {
-			t.Fatalf("%s unexpected collateral exchange: %+v", name, col)
-		}
+	col, err := ad.FetchCollateralRatio(context.Background())
+	if err != nil || col.Exchange != name {
+		t.Fatalf("%s invalid collateral: %+v err=%v", name, col, err)
+	}
+
+	markets, err := ad.FetchMarkets(context.Background())
+	if err != nil || len(markets) == 0 {
+		t.Fatalf("%s FetchMarkets failed: len=%d err=%v", name, len(markets), err)
 	}
 }

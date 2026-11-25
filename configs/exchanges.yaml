@@ -8,17 +8,22 @@ exchanges:
     rate_limit_rps: 15
     max_retries: 3
     circuit_breaker_threshold: 5
-    symbol_allowlist:
-      - "BTC"
-      - "ETH"
-      - "SOL"
-    symbol_blocklist: []
     unified_margin: true
+    market_discovery:
+      enabled: true
+      markets:
+        - spot
+        - linear_perpetual
+      quote_assets:
+        - USDT
+      refresh_interval_sec: 300
+      blocklist: []
     polling:
       book_interval_ms: 750
       funding_interval_sec: 30
       funding_fast_interval_sec: 5
       collateral_interval_sec: 1800
+      max_concurrent_polls: 8
 
   bybit:
     enabled: true
@@ -29,17 +34,22 @@ exchanges:
     rate_limit_rps: 15
     max_retries: 3
     circuit_breaker_threshold: 5
-    symbol_allowlist:
-      - "BTC"
-      - "ETH"
-      - "SOL"
-    symbol_blocklist: []
     unified_margin: true
+    market_discovery:
+      enabled: true
+      markets:
+        - spot
+        - linear_perpetual
+      quote_assets:
+        - USDT
+      refresh_interval_sec: 300
+      blocklist: []
     polling:
       book_interval_ms: 750
       funding_interval_sec: 30
       funding_fast_interval_sec: 5
       collateral_interval_sec: 1800
+      max_concurrent_polls: 8
 
   mexc:
     enabled: true
@@ -50,14 +60,19 @@ exchanges:
     rate_limit_rps: 15
     max_retries: 3
     circuit_breaker_threshold: 5
-    symbol_allowlist:
-      - "BTC"
-      - "ETH"
-      - "SOL"
-    symbol_blocklist: []
     unified_margin: false
+    market_discovery:
+      enabled: true
+      markets:
+        - spot
+        - linear_perpetual
+      quote_assets:
+        - USDT
+      refresh_interval_sec: 300
+      blocklist: []
     polling:
       book_interval_ms: 750
       funding_interval_sec: 30
       funding_fast_interval_sec: 5
       collateral_interval_sec: 1800
+      max_concurrent_polls: 8

@@ -30,9 +30,10 @@ func (e *MatrixEvaluator) snapshotStore() storeSnapshot {
 		return healthyList[i].Name < healthyList[j].Name
 	})
 
-	baseAssets := collectBaseAssets(e.store.books)
-	booksCopy := cloneBooks(e.store.books)
-	fundingsCopy := cloneFundings(e.store.fundings)
+	reg := e.store.registry
+	booksCopy := cloneBooks(e.store.books, reg)
+	fundingsCopy := cloneFundings(e.store.fundings, reg)
+	baseAssets := collectBaseAssets(booksCopy)
 	collateralsCopy := make(map[string]*domain.CollateralSnapshot, len(e.store.collaterals))
 	for ex, col := range e.store.collaterals {
 		collateralsCopy[ex] = col
@@ -63,22 +64,36 @@ func collectBaseAssets(books map[string]map[domain.CanonSymbol]*domain.OrderBook
 	return baseAssets
 }
 
-func cloneBooks(src map[string]map[domain.CanonSymbol]*domain.OrderBookSnapshot) map[string]map[domain.CanonSymbol]*domain.OrderBookSnapshot {
+func cloneBooks(
+	src map[string]map[domain.CanonSymbol]*domain.OrderBookSnapshot,
+	reg *MarketRegistry,
+) map[string]map[domain.CanonSymbol]*domain.OrderBookSnapshot {
+	enforceReg := reg != nil && !reg.IsEmpty()
 	dst := make(map[string]map[domain.CanonSymbol]*domain.OrderBookSnapshot, len(src))
 	for ex, bm := range src {
 		dst[ex] = make(map[domain.CanonSymbol]*domain.OrderBookSnapshot, len(bm))
 		for sym, snap := range bm {
+			if enforceReg && !reg.IsMarketActive(ex, sym) {
+				continue
+			}
 			dst[ex][sym] = snap
 		}
 	}
 	return dst
 }
 
-func cloneFundings(src map[string]map[domain.CanonSymbol]*domain.FundingSnapshot) map[string]map[domain.CanonSymbol]*domain.FundingSnapshot {
+func cloneFundings(
+	src map[string]map[domain.CanonSymbol]*domain.FundingSnapshot,
+	reg *MarketRegistry,
+) map[string]map[domain.CanonSymbol]*domain.FundingSnapshot {
+	enforceReg := reg != nil && !reg.IsEmpty()
 	dst := make(map[string]map[domain.CanonSymbol]*domain.FundingSnapshot, len(src))
 	for ex, fm := range src {
 		dst[ex] = make(map[domain.CanonSymbol]*domain.FundingSnapshot, len(fm))
 		for sym, snap := range fm {
+			if enforceReg && !reg.IsMarketActive(ex, sym) {
+				continue
+			}
 			dst[ex][sym] = snap
 		}
 	}

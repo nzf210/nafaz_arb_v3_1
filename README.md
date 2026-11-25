@@ -107,7 +107,49 @@ Sinyal **HANYA** diterbitkan ke Redis `core:signals` jika lolos **seluruh** gerb
 
 ---
 
-### 1.4 Siklus Hidup Posisi: Dari Entry hingga Auto-Exit (Realisasi Profit)
+### 1.4 Arsitektur Discovery Otomatis & Siklus Hidup Posisi
+
+#### Alur Data Scanner: *Automatic Discovery $\rightarrow$ Cross-CEX Matching $\rightarrow$ Signal Publisher*
+
+`nafaz_arb` v3.1 menemukan seluruh pasangan market aktif secara otomatis dari API publik tiap bursa tanpa mengharuskan operator mendaftarkan koin (`BTC`, `ETH`, `SOL`) secara manual:
+
+```text
+[Exchange API (OKX / Bybit / MEXC)]
+       │
+       ▼
+[Market Discovery (Adapter.FetchMarkets)]
+       │  (Startup + Periodic Refresh tiap refresh_interval_sec=300s)
+       ▼
+[Market Validation]
+       │  (Filter status active/trading, quote_assets=[USDT], markets=[spot, linear_perpetual], blocklist)
+       ▼
+[Symbol Normalization]
+       │  (Normalisasi berbasis BaseAsset + QuoteAsset + MarketType -> BASE/USDT atau BASE/USDT:USDT)
+       ▼
+[Cross-CEX Matching (MarketRegistry)]
+       │  (Irisan market >= 2 CEX untuk Perp-Perp / Spot-Perp Cross-CEX, atau Spot+Perp pada 1 CEX Unified Margin)
+       ▼
+[Dynamic Subscription / Polling Scheduler]
+       │  (Hanya mem-polling market yang lolos matching; bounded concurrency + token-bucket rate limiter)
+       ▼
+[Orderbook & Funding Collection -> In-Memory StateStore]
+       │  (Auto-evict market yang delisted / nonaktif dari StateStore)
+       ▼
+[Matrix Evaluator (Staleness Gate -> Auto-Route Matrix -> Shared VWAP -> Multi-Profile Filter)]
+       │
+       ▼
+[Signal Publisher -> Redis: core:signals & meta:*]
+```
+
+#### Contoh Cross-CEX Matching Otomatis
+| Asset | OKX (`linear_perp`) | Bybit (`linear_perp`) | MEXC (`linear_perp`) | Keputusan Cross-CEX Matching |
+| :--- | :--- | :--- | :--- | :--- |
+| **BTC, ETH, SOL** | Available | Available | Available | **Matched (3 CEX):** Dievaluasi 2 arah pada OKX↔Bybit, OKX↔MEXC, Bybit↔MEXC. |
+| **ABC** | Available | Unavailable | Available | **Matched (2 CEX):** Hanya dipolling & dievaluasi 2 arah OKX↔MEXC (tidak pernah dipaksakan ke Bybit). |
+| **XYZ** | Unavailable | Available | Available | **Matched (2 CEX):** Hanya dipolling & dievaluasi 2 arah Bybit↔MEXC (tidak pernah dipaksakan ke OKX). |
+| **SINGLE** | Available | Unavailable | Unavailable | **Unmatched (1 CEX):** Diabaikan dari rute cross-CEX; tidak membebani kuota polling cross-CEX. |
+
+#### Siklus Hidup Eksekusi: Dari Sinyal hingga Auto-Exit (Realisasi Profit)
 
 ```text
 [Go Scanner] --(Sinyal Valid < 2.5s)--> [Redis: core:signals]
@@ -148,6 +190,7 @@ Setiap bursa di Go Scanner wajib mengimplementasikan interface [`adapter.Exchang
 type ExchangeAdapter interface {
     Name() string
     Capabilities() Capabilities
+    FetchMarkets(ctx context.Context) ([]domain.MarketDescriptor, error)
     FetchOrderBook(ctx context.Context, symbol domain.CanonSymbol) (*domain.OrderBookSnapshot, error)
     FetchFundingRate(ctx context.Context, symbol domain.CanonSymbol) (*domain.FundingSnapshot, error)
     FetchCollateralRatio(ctx context.Context) (*domain.CollateralSnapshot, error)
@@ -157,7 +200,7 @@ type ExchangeAdapter interface {
 ```
 
 #### Contoh Template `scanner-go/internal/adapter/binance/binance.go`:
-Gunakan [`resilience.HTTPExecutor`](./scanner-go/internal/adapter/resilience/resilience.go) yang sudah tersedia untuk mendapatkan *Rate Limiter*, *Circuit Breaker*, dan *Exponential Backoff* secara otomatis:
+Gunakan [`resilience.Client`](./scanner-go/internal/adapter/resilience/resilience.go) yang sudah tersedia untuk mendapatkan *Rate Limiter*, *Circuit Breaker*, dan *Exponential Backoff* secara otomatis:
 
 ```go
 package binance
@@ -165,9 +208,7 @@ package binance
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"strings"
-	"time"
 
 	"nafaz_arb/internal/adapter"
 	"nafaz_arb/internal/adapter/resilience"
@@ -175,20 +216,18 @@ import (
 )
 
 type Adapter struct {
-	cfg  domain.ExchangeConfig
-	exec *resilience.HTTPExecutor
+	cfg    domain.ExchangeConfig
+	client *resilience.Client
 }
 
 func NewAdapter(cfg domain.ExchangeConfig) (adapter.ExchangeAdapter, error) {
-	if cfg.BaseURL == "" {
-		cfg.BaseURL = "https://api.binance.com"
+	if strings.TrimSpace(cfg.BaseURL) == "" {
+		return nil, fmt.Errorf("binance base_url is required")
 	}
-	exec := resilience.NewHTTPExecutor(&http.Client{Timeout: 5 * time.Second}, resilience.Config{
-		RateLimitRPS:            cfg.RateLimitRPS,
-		MaxRetries:              cfg.MaxRetries,
-		CircuitBreakerThreshold: cfg.CircuitBreakerThreshold,
-	})
-	return &Adapter{cfg: cfg, exec: exec}, nil
+	return &Adapter{
+		cfg:    cfg,
+		client: resilience.NewClientFromExchangeConfig(cfg),
+	}, nil
 }
 
 func (a *Adapter) Name() string { return "binance" }
@@ -208,24 +247,22 @@ func (a *Adapter) NormalizeSymbol(raw string, marketType domain.MarketType) (dom
 		return "", fmt.Errorf("binance: unsupported quote in %q", raw)
 	}
 	base := strings.TrimSuffix(s, "USDT")
-	return domain.NewCanonSymbol(base, marketType)
+	return domain.NormalizeMarketSymbol(base, "USDT", marketType)
 }
 
 func (a *Adapter) ToRawSymbol(canon domain.CanonSymbol) string {
 	return canon.BaseAsset() + "USDT"
 }
 
-// Implementasikan FetchOrderBook, FetchFundingRate, dan FetchCollateralRatio
+// Implementasikan FetchMarkets, FetchOrderBook, FetchFundingRate, dan FetchCollateralRatio
 // (Lihat scanner-go/internal/adapter/bybit/bybit.go sebagai referensi lengkap).
 ```
 
 > **Aturan Kualitas Wajib**:
 > - Panjang file maksimal **500 baris** dan *Cognitive Complexity* per fungsi maksimal **15** (sesuai skill `sonarqube-code-quality`).
+> - `FetchMarkets` wajib memvalidasi status market aktif (`TRADING` / `live`), quote asset (`USDT`), dan memisahkan `spot` vs `linear_perp`.
 > - Pastikan `FetchOrderBook` mengisi `Volume24hUSDT` (ambil dari endpoint ticker 24h jika endpoint orderbook tidak menyertakan volume).
-> - Pastikan `FetchFundingRate` memvalidasi `IntervalHours > 0` dan `NextFundingMs > 0`.
-
-#### Uji Adapter Baru dengan *Shared Contract Test Suite*:
-Buat file `scanner-go/internal/adapter/binance/binance_test.go` dan panggil `adapter.RunContractSuite(t, ad, spotSym, perpSym)` untuk memverifikasi kepatuhan kontrak secara otomatis.
+> - Pastikan `FetchFundingRate` memvalidasi `IntervalHours > 0` dan `NextSettlementMs > 0`.
 
 ---
 
@@ -248,7 +285,7 @@ func BuildDefaultRegistry() *adapter.Registry {
 
 ### Langkah 3: Tambahkan Konfigurasi Bursa di `configs/exchanges.yaml`
 
-Buka [`configs/exchanges.yaml`](./configs/exchanges.yaml) dan tambahkan blok konfigurasi bursa baru:
+Buka [`configs/exchanges.yaml`](./configs/exchanges.yaml) dan tambahkan blok konfigurasi bursa baru dengan `market_discovery` dinamis (tanpa perlu menulis daftar koin manual):
 
 ```yaml
   binance:
@@ -260,12 +297,16 @@ Buka [`configs/exchanges.yaml`](./configs/exchanges.yaml) dan tambahkan blok kon
     rate_limit_rps: 15
     max_retries: 3
     circuit_breaker_threshold: 5
-    symbol_allowlist:
-      - "BTC"
-      - "ETH"
-      - "SOL"
-    symbol_blocklist: []
     unified_margin: true
+    market_discovery:
+      enabled: true
+      markets:
+        - spot
+        - linear_perpetual
+      quote_assets:
+        - USDT
+      refresh_interval_sec: 300
+      blocklist: []
     polling:
       book_interval_ms: 750
       funding_interval_sec: 30
@@ -273,7 +314,7 @@ Buka [`configs/exchanges.yaml`](./configs/exchanges.yaml) dan tambahkan blok kon
       collateral_interval_sec: 1800
 ```
 
-Begitu terdaftar di `BuildDefaultRegistry()` dan `enabled: true` di `exchanges.yaml`, **Auto-Route Matrix** di Go Scanner akan otomatis memindai semua pasangan rute antara bursa baru tersebut dengan OKX, Bybit, dan MEXC!
+Begitu terdaftar di `BuildDefaultRegistry()` dan `enabled: true` di `exchanges.yaml`, **Market Discovery & Cross-CEX Matcher** di Go Scanner akan otomatis menemukan market yang beririsan dengan OKX, Bybit, dan MEXC lalu memindai seluruh rute secara dinamis!
 
 ---
 

@@ -24,22 +24,46 @@ const (
 type MarketType string
 
 const (
-	MarketTypeSpot       MarketType = "spot"
-	MarketTypeLinearPerp MarketType = "linear_perp"
+	MarketTypeSpot            MarketType = "spot"
+	MarketTypeLinearPerp      MarketType = "linear_perp"
+	MarketTypeLinearPerpAlias string     = "linear_perpetual"
+
+	QuoteAssetUSDT  = "USDT"
+	spotCanonSuffix = "/USDT"
+	perpCanonSuffix = "/USDT:USDT"
 )
+
+func ParseMarketType(raw string) (MarketType, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case string(MarketTypeSpot):
+		return MarketTypeSpot, nil
+	case string(MarketTypeLinearPerp), MarketTypeLinearPerpAlias:
+		return MarketTypeLinearPerp, nil
+	default:
+		return "", fmt.Errorf("unsupported market type: %q", raw)
+	}
+}
 
 type CanonSymbol string
 
+func NormalizeMarketSymbol(base, quote string, marketType MarketType) (CanonSymbol, error) {
+	q := strings.ToUpper(strings.TrimSpace(quote))
+	if q != QuoteAssetUSDT {
+		return "", fmt.Errorf("unsupported quote asset %q: must be %s", quote, QuoteAssetUSDT)
+	}
+	return NewCanonSymbol(base, marketType)
+}
+
 func NewCanonSymbol(base string, marketType MarketType) (CanonSymbol, error) {
 	b := strings.ToUpper(strings.TrimSpace(base))
-	if b == "" || strings.ContainsAny(b, "/: ") {
+	if b == "" || strings.ContainsAny(b, "/:-_ ") {
 		return "", fmt.Errorf("invalid base asset: %q", base)
 	}
 	switch marketType {
 	case MarketTypeSpot:
-		return CanonSymbol(b + "/USDT"), nil
+		return CanonSymbol(b + spotCanonSuffix), nil
 	case MarketTypeLinearPerp:
-		return CanonSymbol(b + "/USDT:USDT"), nil
+		return CanonSymbol(b + perpCanonSuffix), nil
 	default:
 		return "", fmt.Errorf("unsupported market type: %q", marketType)
 	}
@@ -47,16 +71,16 @@ func NewCanonSymbol(base string, marketType MarketType) (CanonSymbol, error) {
 
 func (s CanonSymbol) Validate() error {
 	str := string(s)
-	if strings.HasSuffix(str, "/USDT:USDT") {
-		base := strings.TrimSuffix(str, "/USDT:USDT")
-		if base != "" && !strings.ContainsAny(base, "/: ") {
+	if strings.HasSuffix(str, perpCanonSuffix) {
+		base := strings.TrimSuffix(str, perpCanonSuffix)
+		if base != "" && !strings.ContainsAny(base, "/:-_ ") {
 			return nil
 		}
 		return fmt.Errorf("invalid linear_perp canonical symbol: %q", str)
 	}
-	if strings.HasSuffix(str, "/USDT") {
-		base := strings.TrimSuffix(str, "/USDT")
-		if base != "" && !strings.ContainsAny(base, "/: ") {
+	if strings.HasSuffix(str, spotCanonSuffix) {
+		base := strings.TrimSuffix(str, spotCanonSuffix)
+		if base != "" && !strings.ContainsAny(base, "/:-_ ") {
 			return nil
 		}
 		return fmt.Errorf("invalid spot canonical symbol: %q", str)
@@ -68,7 +92,7 @@ func (s CanonSymbol) MarketType() (MarketType, error) {
 	if err := s.Validate(); err != nil {
 		return "", err
 	}
-	if strings.HasSuffix(string(s), "/USDT:USDT") {
+	if strings.HasSuffix(string(s), perpCanonSuffix) {
 		return MarketTypeLinearPerp, nil
 	}
 	return MarketTypeSpot, nil
@@ -80,6 +104,39 @@ func (s CanonSymbol) BaseAsset() string {
 		return str[:idx]
 	}
 	return ""
+}
+
+func (s CanonSymbol) QuoteAsset() string {
+	if s.Validate() == nil {
+		return QuoteAssetUSDT
+	}
+	return ""
+}
+
+type MarketDescriptor struct {
+	Exchange           string      `json:"exchange"`
+	RawSymbol          string      `json:"raw_symbol"`
+	CanonSymbol        CanonSymbol `json:"canon_symbol"`
+	BaseAsset          string      `json:"base_asset"`
+	QuoteAsset         string      `json:"quote_asset"`
+	MarketType         MarketType  `json:"market_type"`
+	Active             bool        `json:"active"`
+	ContractMultiplier float64     `json:"contract_multiplier,omitempty"`
+	DiscoveredAtMs     int64       `json:"discovered_at_ms"`
+}
+
+func (m MarketDescriptor) Validate() error {
+	if strings.TrimSpace(m.Exchange) == "" || strings.TrimSpace(m.RawSymbol) == "" {
+		return errors.New("market descriptor requires exchange and raw_symbol")
+	}
+	expectedCanon, err := NormalizeMarketSymbol(m.BaseAsset, m.QuoteAsset, m.MarketType)
+	if err != nil {
+		return err
+	}
+	if m.CanonSymbol != expectedCanon {
+		return fmt.Errorf("canon_symbol %q does not match %q", m.CanonSymbol, expectedCanon)
+	}
+	return nil
 }
 
 type RouteType string
@@ -258,21 +315,118 @@ type PollingConfig struct {
 	FundingIntervalSec     int `yaml:"funding_interval_sec"`
 	FundingFastIntervalSec int `yaml:"funding_fast_interval_sec"`
 	CollateralIntervalSec  int `yaml:"collateral_interval_sec"`
+	MaxConcurrentPolls     int `yaml:"max_concurrent_polls"`
+}
+
+type MarketDiscoveryConfig struct {
+	Enabled            bool     `yaml:"enabled"`
+	Markets            []string `yaml:"markets"`
+	QuoteAssets        []string `yaml:"quote_assets"`
+	RefreshIntervalSec int      `yaml:"refresh_interval_sec"`
+	Allowlist          []string `yaml:"allowlist"`
+	Blocklist          []string `yaml:"blocklist"`
 }
 
 type ExchangeConfig struct {
-	Enabled                 bool          `yaml:"enabled"`
-	BaseURL                 string        `yaml:"base_url"`
-	WSURL                   string        `yaml:"ws_url"`
-	SpotTakerFee            float64       `yaml:"spot_taker_fee"`
-	PerpTakerFee            float64       `yaml:"perp_taker_fee"`
-	RateLimitRPS            float64       `yaml:"rate_limit_rps"`
-	MaxRetries              int           `yaml:"max_retries"`
-	CircuitBreakerThreshold int           `yaml:"circuit_breaker_threshold"`
-	SymbolAllowlist         []string      `yaml:"symbol_allowlist"`
-	SymbolBlocklist         []string      `yaml:"symbol_blocklist"`
-	UnifiedMargin           bool          `yaml:"unified_margin"`
-	Polling                 PollingConfig `yaml:"polling"`
+	Enabled                 bool                  `yaml:"enabled"`
+	BaseURL                 string                `yaml:"base_url"`
+	WSURL                   string                `yaml:"ws_url"`
+	SpotTakerFee            float64               `yaml:"spot_taker_fee"`
+	PerpTakerFee            float64               `yaml:"perp_taker_fee"`
+	RateLimitRPS            float64               `yaml:"rate_limit_rps"`
+	MaxRetries              int                   `yaml:"max_retries"`
+	CircuitBreakerThreshold int                   `yaml:"circuit_breaker_threshold"`
+	SymbolAllowlist         []string              `yaml:"symbol_allowlist"`
+	SymbolBlocklist         []string              `yaml:"symbol_blocklist"`
+	UnifiedMargin           bool                  `yaml:"unified_margin"`
+	MarketDiscovery         MarketDiscoveryConfig `yaml:"market_discovery"`
+	Polling                 PollingConfig         `yaml:"polling"`
+}
+
+func (e ExchangeConfig) EffectiveDiscoveryConfig() MarketDiscoveryConfig {
+	md := e.MarketDiscovery
+	if !md.Enabled && len(md.Markets) == 0 && len(md.QuoteAssets) == 0 && md.RefreshIntervalSec == 0 {
+		md.Enabled = true
+	}
+	if len(md.Markets) == 0 {
+		md.Markets = []string{string(MarketTypeSpot), MarketTypeLinearPerpAlias}
+	}
+	if len(md.QuoteAssets) == 0 {
+		md.QuoteAssets = []string{QuoteAssetUSDT}
+	}
+	if md.RefreshIntervalSec <= 0 {
+		md.RefreshIntervalSec = 300
+	}
+	md.Allowlist = mergeUniqueUpper(md.Allowlist, e.SymbolAllowlist)
+	md.Blocklist = mergeUniqueUpper(md.Blocklist, e.SymbolBlocklist)
+	return md
+}
+
+func (e ExchangeConfig) AllowsMarket(desc MarketDescriptor) bool {
+	if !desc.Active || desc.Validate() != nil {
+		return false
+	}
+	md := e.EffectiveDiscoveryConfig()
+	if !matchesMarketTypeFilter(desc.MarketType, md.Markets) {
+		return false
+	}
+	if !containsUpperToken(md.QuoteAssets, desc.QuoteAsset) {
+		return false
+	}
+	if matchesAssetOrSymbolList(desc, md.Blocklist) {
+		return false
+	}
+	if len(md.Allowlist) > 0 && !matchesAssetOrSymbolList(desc, md.Allowlist) {
+		return false
+	}
+	return true
+}
+
+func mergeUniqueUpper(slices ...[]string) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	for _, s := range slices {
+		for _, item := range s {
+			tok := strings.ToUpper(strings.TrimSpace(item))
+			if tok == "" {
+				continue
+			}
+			if _, ok := seen[tok]; !ok {
+				seen[tok] = struct{}{}
+				out = append(out, tok)
+			}
+		}
+	}
+	return out
+}
+
+func matchesMarketTypeFilter(mt MarketType, filters []string) bool {
+	for _, raw := range filters {
+		if parsed, err := ParseMarketType(raw); err == nil && parsed == mt {
+			return true
+		}
+	}
+	return false
+}
+
+func containsUpperToken(list []string, target string) bool {
+	t := strings.ToUpper(strings.TrimSpace(target))
+	for _, item := range list {
+		if strings.ToUpper(strings.TrimSpace(item)) == t {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesAssetOrSymbolList(desc MarketDescriptor, list []string) bool {
+	for _, item := range list {
+		tok := strings.ToUpper(strings.TrimSpace(item))
+		if tok == desc.BaseAsset || tok == string(desc.CanonSymbol) || tok == strings.ToUpper(desc.RawSymbol) {
+			return true
+		}
+	}
+	return false
 }
 
 type ExchangesConfig struct {

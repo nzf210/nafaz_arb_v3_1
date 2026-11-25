@@ -39,6 +39,47 @@ func TestSymbolMapping(t *testing.T) {
 			t.Fatalf("ToRawSymbol(%q) = %q; want %q", tc.canon, gotRaw, tc.raw)
 		}
 	}
+
+	// Spot and Perp formats must not be interchangeable on MEXC
+	if _, err := a.NormalizeSymbol("BTC_USDT", domain.MarketTypeSpot); err == nil {
+		t.Fatal("expected MEXC contract symbol BTC_USDT to be rejected for spot")
+	}
+	if _, err := a.NormalizeSymbol("BTCUSDT", domain.MarketTypeLinearPerp); err == nil {
+		t.Fatal("expected MEXC spot symbol BTCUSDT to be rejected for linear_perp")
+	}
+}
+
+func TestFetchMarketsMEXC(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v3/exchangeInfo":
+			_, _ = w.Write([]byte(`{"symbols":[
+				{"symbol":"BTCUSDT","status":"1","baseAsset":"BTC","quoteAsset":"USDT","isSpotTradingAllowed":true},
+				{"symbol":"DISABLEDUSDT","status":"1","baseAsset":"DISABLED","quoteAsset":"USDT","isSpotTradingAllowed":false}
+			]}`))
+		case "/api/v1/contract/detail":
+			_, _ = w.Write([]byte(`{"success":true,"data":[
+				{"symbol":"BTC_USDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT","contractSize":0.0001,"state":0},
+				{"symbol":"ABC_USDT","baseCoin":"ABC","quoteCoin":"USDT","settleCoin":"USDT","contractSize":1,"state":0},
+				{"symbol":"OFFLINE_USDT","baseCoin":"OFFLINE","quoteCoin":"USDT","settleCoin":"USDT","contractSize":1,"state":1}
+			]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	a, err := NewAdapter(domain.ExchangeConfig{BaseURL: srv.URL, RateLimitRPS: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	markets, err := a.FetchMarkets(context.Background())
+	if err != nil {
+		t.Fatalf("FetchMarkets failed: %v", err)
+	}
+	if len(markets) != 3 {
+		t.Fatalf("expected 3 active MEXC markets (1 spot + 2 linear perp), got %d: %+v", len(markets), markets)
+	}
 }
 
 func TestFetchEndpointsAnd429Retry(t *testing.T) {

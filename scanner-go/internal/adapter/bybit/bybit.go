@@ -57,13 +57,11 @@ func (a *Adapter) Client() *resilience.Client {
 
 func (a *Adapter) NormalizeSymbol(raw string, marketType domain.MarketType) (domain.CanonSymbol, error) {
 	s := strings.ToUpper(strings.TrimSpace(raw))
-	s = strings.ReplaceAll(s, "-", "")
-	s = strings.ReplaceAll(s, "_", "")
-	if !strings.HasSuffix(s, "USDT") {
-		return "", fmt.Errorf("bybit: symbol %q must end with USDT", raw)
+	if strings.ContainsAny(s, "-_/: ") || !strings.HasSuffix(s, domain.QuoteAssetUSDT) {
+		return "", fmt.Errorf("bybit: symbol %q must be linear BASEUSDT format", raw)
 	}
-	base := strings.TrimSuffix(s, "USDT")
-	return domain.NewCanonSymbol(base, marketType)
+	base := strings.TrimSuffix(s, domain.QuoteAssetUSDT)
+	return domain.NormalizeMarketSymbol(base, domain.QuoteAssetUSDT, marketType)
 }
 
 func (a *Adapter) ToRawSymbol(canon domain.CanonSymbol) string {

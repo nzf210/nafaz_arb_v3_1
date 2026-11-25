@@ -58,27 +58,24 @@ func (a *Adapter) Client() *resilience.Client {
 	return a.client
 }
 
+const (
+	mexcPerpSuffix = "_USDT"
+	mexcSpotSuffix = "USDT"
+)
+
 func (a *Adapter) NormalizeSymbol(raw string, marketType domain.MarketType) (domain.CanonSymbol, error) {
 	s := strings.ToUpper(strings.TrimSpace(raw))
 	switch marketType {
 	case domain.MarketTypeLinearPerp:
-		if strings.HasSuffix(s, "_USDT") {
-			base := strings.TrimSuffix(s, "_USDT")
-			return domain.NewCanonSymbol(base, domain.MarketTypeLinearPerp)
-		}
-		if strings.HasSuffix(s, "USDT") {
-			base := strings.TrimSuffix(s, "USDT")
-			return domain.NewCanonSymbol(base, domain.MarketTypeLinearPerp)
+		if strings.HasSuffix(s, mexcPerpSuffix) {
+			base := strings.TrimSuffix(s, mexcPerpSuffix)
+			return domain.NormalizeMarketSymbol(base, domain.QuoteAssetUSDT, domain.MarketTypeLinearPerp)
 		}
 		return "", fmt.Errorf("mexc: unsupported linear_perp raw symbol %q", raw)
 	case domain.MarketTypeSpot:
-		if strings.HasSuffix(s, "_USDT") {
-			base := strings.TrimSuffix(s, "_USDT")
-			return domain.NewCanonSymbol(base, domain.MarketTypeSpot)
-		}
-		if strings.HasSuffix(s, "USDT") {
-			base := strings.TrimSuffix(s, "USDT")
-			return domain.NewCanonSymbol(base, domain.MarketTypeSpot)
+		if strings.HasSuffix(s, mexcSpotSuffix) && !strings.HasSuffix(s, mexcPerpSuffix) {
+			base := strings.TrimSuffix(s, mexcSpotSuffix)
+			return domain.NormalizeMarketSymbol(base, domain.QuoteAssetUSDT, domain.MarketTypeSpot)
 		}
 		return "", fmt.Errorf("mexc: unsupported spot raw symbol %q", raw)
 	default:

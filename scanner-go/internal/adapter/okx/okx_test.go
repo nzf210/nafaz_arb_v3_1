@@ -42,6 +42,49 @@ func TestSymbolMapping(t *testing.T) {
 			t.Fatalf("ToRawSymbol(%q) = %q, want %q", tc.canon, gotRaw, tc.raw)
 		}
 	}
+
+	// Strict Spot vs Perp separation: BTC-USDT must not normalize as linear_perp, and BTC-USDT-SWAP must not normalize as spot
+	if _, err := a.NormalizeSymbol("BTC-USDT", domain.MarketTypeLinearPerp); err == nil {
+		t.Fatal("expected OKX spot raw symbol BTC-USDT to be rejected for linear_perp")
+	}
+	if _, err := a.NormalizeSymbol("BTC-USDT-SWAP", domain.MarketTypeSpot); err == nil {
+		t.Fatal("expected OKX swap raw symbol BTC-USDT-SWAP to be rejected for spot")
+	}
+}
+
+func TestFetchMarketsOKX(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		instType := r.URL.Query().Get("instType")
+		switch instType {
+		case "SPOT":
+			_, _ = w.Write([]byte(`{"code":"0","data":[
+				{"instId":"BTC-USDT","instType":"SPOT","baseCcy":"BTC","quoteCcy":"USDT","state":"live"},
+				{"instId":"DELIST-USDT","instType":"SPOT","baseCcy":"DELIST","quoteCcy":"USDT","state":"suspend"},
+				{"instId":"BTC-USDC","instType":"SPOT","baseCcy":"BTC","quoteCcy":"USDC","state":"live"}
+			]}`))
+		case "SWAP":
+			_, _ = w.Write([]byte(`{"code":"0","data":[
+				{"instId":"BTC-USDT-SWAP","instType":"SWAP","ctType":"linear","settleCcy":"USDT","ctVal":"0.01","state":"live"},
+				{"instId":"ABC-USDT-SWAP","instType":"SWAP","ctType":"linear","settleCcy":"USDT","ctVal":"1","state":"live"},
+				{"instId":"BTC-USD-SWAP","instType":"SWAP","ctType":"inverse","settleCcy":"BTC","ctVal":"100","state":"live"}
+			]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	a, err := NewAdapter(domain.ExchangeConfig{BaseURL: srv.URL, RateLimitRPS: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	markets, err := a.FetchMarkets(context.Background())
+	if err != nil {
+		t.Fatalf("FetchMarkets failed: %v", err)
+	}
+	if len(markets) != 3 {
+		t.Fatalf("expected 3 valid active USDT markets (1 spot + 2 linear perp), got %d: %+v", len(markets), markets)
+	}
 }
 
 func mockOKXHandler(hits *atomic.Int32) http.HandlerFunc {
