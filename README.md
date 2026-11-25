@@ -74,7 +74,8 @@ Karena kedua kaki berada di dua akun CEX terpisah (margin tidak menyatu seperti 
 1. **Gunakan Leverage Rendah (1x–2x)**: Jangan gunakan leverage tinggi agar jarak likuidasi sangat jauh.
 2. **Watchdog Margin Ratio (`check_margin_ratios`)**: Memantau margin tiap CEX secara terpisah; jika salah satu CEX menyentuh $>60\%$ keluar peringatan Telegram, dan jika $>75\%$ *Kill-Switch* aktif.
 3. **Watchdog ADL (`check_adl_indicators`)**: Jika lawan transaksi Anda di salah satu CEX bangkrut dan lampu indikator *Auto-Deleveraging* menyentuh $\ge 4/5$, sistem langsung melakukan **Early Unwind** (menutup kedua kaki secara bersamaan dengan `reduceOnly=True`) sebelum posisi Anda diputus sepihak oleh bursa.
-4. **Watchdog Auto-Exit Normalisasi 24h (`check_exit_conditions`)**: Memantau selisih funding bersih berbasis 24 jam (`short_24h - long_24h`). Begitu spread berbalik negatif atau `target_hold_days` tercapai, kedua kaki Futures ditutup serentak via Market Order `reduceOnly`.
+4. **Watchdog Auto-Exit (`check_exit_conditions`)**: Memantau funding 24 jam (`short_24h - long_24h`), target waktu tahan per profil, serta target/stop basis untuk `basis_convergence_fast` (default target 0,10%; stop saat spread melebar 0,50% dari basis masuk). Funding/basis yang tidak tersedia memicu peringatan dan tidak dianggap sebagai sinyal keluar; batas waktu tahan tetap aktif. Posisi baru ditandai closed setelah kedua kaki `reduceOnly` diverifikasi flat. PnL harga gross belum termasuk fee/funding, dan hanya tersedia bila average fill masuk serta keluar tercatat.
+5. **Watchdog Position Drift (`reconcile_positions`)**: Membandingkan kuantitas posisi futures dari endpoint posisi CEX (tidak memakai saldo spot sebagai fallback). Jika API posisi gagal, statusnya `DATA_UNAVAILABLE` dan tidak dilaporkan sebagai drift nol; alert menampilkan CEX/simbol yang gagal diverifikasi.
 
 ---
 

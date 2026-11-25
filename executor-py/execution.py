@@ -302,14 +302,16 @@ class DeltaNeutralExecutor:
             return self._handle_unhedged_leg_a(signal, client_a, sym_a, side_a, leg_a["exchange"], qty, filled_a, filled_b, unhedged_a, cancelled_unfilled_a, last_error)
 
         status = "FILLED_1TO1" if filled_a == qty else "PARTIAL_FILLED_1TO1"
+        average_a = order_a.get("average")
+        average_b = order_b.get("average") if order_b else None
         if self.notifier:
             self.notifier(f"[EXEC] {status} {signal['base_asset']} qty={filled_a}")
         return {
             "status": status, "signal_id": signal["signal_id"], "base_asset": signal["base_asset"],
             "qty": filled_a, "qty_requested": qty, "qty_filled_a": filled_a, "qty_filled_b": filled_b,
             "price_a": price_a, "price_b": price_b,
-            "leg_a": {"exchange": leg_a["exchange"], "symbol": sym_a, "side": side_a, "price": price_a, "qty": filled_a},
-            "leg_b": {"exchange": leg_b["exchange"], "symbol": sym_b, "side": side_b, "price": price_b, "qty": filled_b},
+            "leg_a": {"exchange": leg_a["exchange"], "symbol": sym_a, "side": side_a, "price": price_a, "entry_avg_price": average_a, "qty": filled_a},
+            "leg_b": {"exchange": leg_b["exchange"], "symbol": sym_b, "side": side_b, "price": price_b, "entry_avg_price": average_b, "qty": filled_b},
             "cancelled_unfilled_a": cancelled_unfilled_a, "order_a": order_a, "order_b": order_b,
         }
 

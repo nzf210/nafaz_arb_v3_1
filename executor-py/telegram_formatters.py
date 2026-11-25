@@ -299,32 +299,57 @@ def format_rejection_metrics(stats: Dict[str, int]) -> str:
     return "\n".join(lines)
 
 
-def format_risk_status(risk_data: Dict[str, Any]) -> str:
-    margins = risk_data.get("margins", {})
-    adls = risk_data.get("adls", [])
-    drifts = risk_data.get("drifts", [])
-
-    lines = ["🛡️ <b>Status Manajemen Risiko</b>\n"]
-    lines.append("• <b>Margin Usage CEX:</b>")
+def _append_margin_status(lines: List[str], margins: Dict[str, Any]) -> None:
     if margins:
         for ex, r in margins.items():
             lines.append(f"  - <b>{ex.upper()}</b>: <code>{float(r):.2%}</code>")
     else:
         lines.append("  - <i>Semua aman / belum ada posisi leverage</i>")
 
-    lines.append("\n• <b>Indikator ADL:</b>")
+
+def _append_adl_status(lines: List[str], adls: List[Dict[str, Any]]) -> None:
     if adls:
         for a in adls:
             lines.append(f"  - ⚠️ {a.get('base_asset')}: Rank <code>{a.get('adl_rank')}/5</code>")
     else:
         lines.append("  - 🟢 <i>Tidak ada risiko de-leveraging terdeteksi</i>")
 
+
+def _append_position_drift_status(
+    lines: List[str],
+    drifts: List[Dict[str, Any]],
+    unavailable: List[Dict[str, Any]],
+) -> None:
+    if not drifts and unavailable:
+        lines.append("  - ⚠️ Drift tidak dapat diverifikasi: data posisi CEX tidak tersedia.")
+    if not drifts and not unavailable:
+        lines.append("  - 🟢 <i>Data valid; posisi kedua kaki seimbang</i>")
+    for drift in drifts:
+        lines.append(
+            f"  - ⚠️ {drift.get('base_asset')}: "
+            f"{drift.get('leg_a_exchange')} {drift.get('leg_a_symbol')}="
+            f"<code>{drift.get('actual_qty_a')}</code>, "
+            f"{drift.get('leg_b_exchange')} {drift.get('leg_b_symbol')}="
+            f"<code>{drift.get('actual_qty_b')}</code> "
+            f"(expected <code>{drift.get('expected_qty')}</code>)"
+        )
+    for item in unavailable:
+        for issue in item.get("issues", []):
+            cex = issue.get("exchange", "unknown")
+            symbol = issue.get("symbol", "")
+            lines.append(
+                f"  - ⚠️ {item.get('base_asset')} {cex} {symbol}: "
+                f"<code>{html.escape(str(issue.get('issue', 'unknown error')))}</code>"
+            )
+
+
+def format_risk_status(risk_data: Dict[str, Any]) -> str:
+    lines = ["🛡️ <b>Status Manajemen Risiko</b>\n", "• <b>Margin Usage CEX:</b>"]
+    _append_margin_status(lines, risk_data.get("margins", {}))
+    lines.append("\n• <b>Indikator ADL:</b>")
+    _append_adl_status(lines, risk_data.get("adls", []))
     lines.append("\n• <b>Position Drift 1:1:</b>")
-    if drifts:
-        for d in drifts:
-            lines.append(f"  - ⚠️ {d.get('base_asset')}: Drift <code>{d.get('leg_drift')}</code>")
-    else:
-        lines.append("  - 🟢 <i>Posisi kedua kaki seimbang sempurna</i>")
+    _append_position_drift_status(lines, risk_data.get("drifts", []), risk_data.get("unavailable", []))
     return "\n".join(lines).strip()
 
 
@@ -391,10 +416,19 @@ def format_position_opened_alert(signal: Dict[str, Any], result: Dict[str, Any])
 def format_position_closed_alert(unwind_result: Dict[str, Any], base_asset: str) -> str:
     status = unwind_result.get("status", "UNWOUND")
     asset = html.escape(base_asset).upper()
+    pnl = unwind_result.get("realized_pnl_usdt")
+    pnl_line = (
+        f"• PnL harga (gross, belum termasuk fee/funding): <b>{float(pnl):+.4f} USDT</b>\n"
+        if pnl is not None
+        else "• PnL harga: tidak tersedia (average fill masuk/keluar tidak tercatat)\n"
+    )
+    close_reason = html.escape(str(unwind_result.get("close_reason") or ""))
     return (
         f"🎉 <b>POSISI SELESAI DITUTUP!</b>\n\n"
         f"• Aset: <b>{asset}</b>\n"
         f"• Status Unwind: <code>{status}</code>\n"
-        f"• Flat Verifikasi: <code>{unwind_result.get('verified_flat', True)}</code>\n\n"
+        f"• Flat Verifikasi: <code>{unwind_result.get('verified_flat', True)}</code>\n"
+        f"{pnl_line}"
+        f"• Alasan: <code>{close_reason}</code>\n\n"
         "<i>Ketik /history untuk melihat riwayat eksekusi.</i>"
     )

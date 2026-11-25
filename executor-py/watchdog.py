@@ -2,15 +2,24 @@
 
 import json
 import logging
+import math
 import os
 import urllib.request
 from typing import Any, Callable, Dict, List, Optional
+
+from exit_monitor import evaluate_position_exit
+from exit_rules import (
+    DEFAULT_PROFILE_EXIT_SETTINGS,
+    calculate_realized_price_pnl,
+)
+from position_reconciliation import fetch_leg_qty, leg_symbol
 
 logger = logging.getLogger(__name__)
 
 MARGIN_WARNING_THRESHOLD = 0.60
 MARGIN_CRITICAL_THRESHOLD = 0.75
 ADL_HIGH_RISK_THRESHOLD = 4
+EXIT_DATA_ALERT_INTERVAL_MS = 300_000
 REDIS_POSITIONS_KEY = "core:positions"
 PERP_SUFFIX = ":USDT"
 
@@ -71,6 +80,23 @@ class RiskWatchdog:
         self.margin_critical_threshold = margin_critical_threshold
         self.adl_threshold = adl_threshold
         self.db_store = db_store
+        self._exit_data_alerted_at: Dict[str, int] = {}
+
+    def _load_exit_profile_settings(self) -> Dict[str, Dict[str, Any]]:
+        settings = {key: dict(value) for key, value in DEFAULT_PROFILE_EXIT_SETTINGS.items()}
+        if self.db_store is None or not hasattr(self.db_store, "load_profile_settings"):
+            return settings
+        try:
+            runtime_settings = self.db_store.load_profile_settings()
+        except Exception as exc:
+            logger.warning("Failed to load exit profile settings: %s", exc)
+            return settings
+        for profile_id, profile in runtime_settings.items():
+            resolved = settings.setdefault(profile_id, {"target_hold_days": 3.0})
+            for key in ("target_hold_days", "basis_target_spread", "basis_adverse_stop_spread"):
+                if profile.get(key) is not None:
+                    resolved[key] = float(profile[key])
+        return settings
 
     def _record_risk(self, event_type: str, severity: str, details: Dict[str, Any]) -> None:
         if self.db_store is not None and hasattr(self.db_store, "record_risk_event"):
@@ -108,11 +134,24 @@ class RiskWatchdog:
         """
         positions = self._load_positions(expected_positions)
         drifts: List[Dict[str, Any]] = []
+        unavailable: List[Dict[str, Any]] = []
         for pos in positions:
             base_asset = pos.get("base_asset", "UNKNOWN")
-            expected_qty = float(pos.get("qty", 0.0))
-            actual_a = self._fetch_leg_qty(pos["leg_a"])
-            actual_b = self._fetch_leg_qty(pos["leg_b"])
+            try:
+                expected_qty = float(pos.get("qty", 0.0))
+            except (TypeError, ValueError, OverflowError):
+                expected_qty = math.nan
+            actual_a, issue_a = fetch_leg_qty(pos.get("leg_a", {}), self.exchanges)
+            actual_b, issue_b = fetch_leg_qty(pos.get("leg_b", {}), self.exchanges)
+            data_issues = self._build_position_data_issues(
+                pos, base_asset, expected_qty, actual_a, actual_b, issue_a, issue_b
+            )
+            if data_issues:
+                unavailable.append(data_issues)
+                self._report_position_data_issues(data_issues)
+                continue
+            actual_a = float(actual_a)
+            actual_b = float(actual_b)
             leg_diff = abs(actual_a - actual_b)
             if max(leg_diff, abs(actual_a - expected_qty), abs(actual_b - expected_qty)) > self.drift_tolerance:
                 drift_info = {
@@ -121,46 +160,61 @@ class RiskWatchdog:
                     "actual_qty_a": actual_a,
                     "actual_qty_b": actual_b,
                     "leg_drift": leg_diff,
+                    "leg_a_exchange": pos["leg_a"].get("exchange", "unknown"),
+                    "leg_a_symbol": leg_symbol(pos["leg_a"]),
+                    "leg_b_exchange": pos["leg_b"].get("exchange", "unknown"),
+                    "leg_b_symbol": leg_symbol(pos["leg_b"]),
                 }
                 drifts.append(drift_info)
                 self._record_risk("POSITION_DRIFT", "WARNING", drift_info)
                 self.notifier.send(
-                    f"[DRIFT] {base_asset} drift detected: expected={expected_qty}, "
-                    f"leg_a={actual_a}, leg_b={actual_b}"
+                    f"[DRIFT] {base_asset}: {drift_info['leg_a_exchange']} "
+                    f"{drift_info['leg_a_symbol']}={actual_a}, "
+                    f"{drift_info['leg_b_exchange']} {drift_info['leg_b_symbol']}={actual_b}; "
+                    f"expected={expected_qty}, leg_drift={leg_diff}"
                 )
 
-        return {"status": "DRIFT_DETECTED" if drifts else "OK", "drifts": drifts}
+        if drifts:
+            status = "DRIFT_DETECTED"
+        elif unavailable:
+            status = "DATA_UNAVAILABLE"
+        else:
+            status = "OK"
+        return {"status": status, "drifts": drifts, "unavailable": unavailable}
 
-    def _find_position_qty(self, client: Any, symbol: str) -> Optional[float]:
-        for p in client.fetch_positions([symbol]):
-            p_sym = p.get("symbol") or (p.get("info") or {}).get("symbol")
-            if p_sym == symbol:
-                qty = p.get("contracts") if p.get("contracts") is not None else p.get("amount", 0.0)
-                raw_ct = p.get("contractSize")
-                if raw_ct is None and hasattr(client, "markets") and client.markets and symbol in client.markets:
-                    raw_ct = client.markets[symbol].get("contractSize")
-                ct_size = float(raw_ct or 1.0)
-                return abs(float(qty or 0.0) * ct_size)
-        return None
+    def _build_position_data_issues(
+        self,
+        pos: Dict[str, Any],
+        base_asset: str,
+        expected_qty: float,
+        actual_a: Optional[float],
+        actual_b: Optional[float],
+        issue_a: Optional[str],
+        issue_b: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        issues = []
+        if not math.isfinite(expected_qty):
+            issues.append({"leg": "position", "issue": "stored expected quantity invalid"})
+        for key, actual, issue in (("leg_a", actual_a, issue_a), ("leg_b", actual_b, issue_b)):
+            if issue or actual is None or not math.isfinite(actual):
+                leg = pos.get(key, {})
+                issues.append(
+                    {
+                        "leg": key,
+                        "exchange": leg.get("exchange", "unknown"),
+                        "symbol": leg_symbol(leg),
+                        "issue": issue or "actual quantity invalid",
+                    }
+                )
+        return {"base_asset": base_asset, "issues": issues} if issues else None
 
-    def _fetch_leg_qty(self, leg: Dict[str, Any]) -> float:
-        if "actual_qty" in leg:
-            return abs(float(leg["actual_qty"]))
-        client = self.exchanges.get(leg["exchange"])
-        if not client:
-            return 0.0
-        symbol = str(leg.get("symbol") or leg.get("canon_symbol") or leg.get("raw_symbol") or "")
-        is_perp = PERP_SUFFIX in symbol
-        can_use_positions = hasattr(client, "fetch_positions") and (is_perp or not hasattr(client, "fetch_balance"))
-        if can_use_positions:
-            found = self._find_position_qty(client, symbol)
-            if found is not None:
-                return found
-        if hasattr(client, "fetch_balance"):
-            bal = client.fetch_balance()
-            base = symbol.split("/")[0].split("-")[0].split("_")[0]
-            return abs(float(bal.get("total", {}).get(base, 0.0) or 0.0))
-        return 0.0
+    def _report_position_data_issues(self, details: Dict[str, Any]) -> None:
+        self._record_risk("POSITION_DATA_UNAVAILABLE", "WARNING", details)
+        description = "; ".join(
+            f"{issue['leg']} {issue.get('exchange', '')} {issue.get('symbol', '')}: {issue['issue']}"
+            for issue in details["issues"]
+        )
+        self.notifier.send(f"[DRIFT DATA UNAVAILABLE] {details['base_asset']}: {description}")
 
     def _okx_margin_ratio(self, info: Dict[str, Any]) -> Optional[float]:
         data = info.get("data")
@@ -237,23 +291,31 @@ class RiskWatchdog:
             result = self.unwind_callback(position)
         except Exception as exc:
             result = {"status": "UNWIND_PENDING", "error": str(exc)}
-        verified = (
-            isinstance(result, dict)
-            and result.get("status") == "UNWOUND_VERIFIED"
-            and result.get("verified_flat") is True
-        )
-        if verified:
-            self.mark_position_closed(base_asset)
-            if hasattr(self.notifier, "notify_position_closed"):
-                try:
-                    self.notifier.notify_position_closed(result, base_asset)
-                except Exception as exc:
-                    logger.warning("Telegram notify_position_closed failed: %s", exc)
+        if self.finalize_verified_close(position, result, trigger):
             return result
         details = {"base_asset": base_asset, "trigger": trigger, "unwind_result": result}
         self._record_risk("UNWIND_UNVERIFIED", "CRITICAL", details)
         self.activate_kill_switch(f"{trigger} unwind not verified for {base_asset}")
         return result
+
+    def finalize_verified_close(
+        self, position: Dict[str, Any], result: Dict[str, Any], close_reason: str
+    ) -> bool:
+        verified = result.get("status") == "UNWOUND_VERIFIED" and result.get("verified_flat") is True
+        if not verified:
+            return False
+        pnl = calculate_realized_price_pnl(position, result)
+        result["realized_pnl_usdt"] = pnl
+        result["realized_pnl_scope"] = "gross_price_before_fees_and_funding"
+        result["close_reason"] = close_reason
+        base_asset = position.get("base_asset", "UNKNOWN")
+        self.mark_position_closed(base_asset, pnl, close_reason)
+        if hasattr(self.notifier, "notify_position_closed"):
+            try:
+                self.notifier.notify_position_closed(result, base_asset)
+            except Exception as exc:
+                logger.warning("Telegram notify_position_closed failed: %s", exc)
+        return True
 
     def check_adl_indicators(self, positions: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         """
@@ -299,66 +361,64 @@ class RiskWatchdog:
             logger.warning("Failed to fetch ADL indicator for %s on %s: %s", symbol, ex_name, exc)
         return 0
 
-    def _fetch_leg_funding_24h(self, leg: Dict[str, Any]) -> Optional[float]:
-        symbol = str(leg.get("symbol") or leg.get("canon_symbol") or leg.get("raw_symbol") or "")
-        if PERP_SUFFIX not in symbol:
-            return 0.0
-        interval_hours = max(int(leg.get("interval_hours") or 8), 1)
-        if leg.get("current_funding_rate") is not None:
-            return float(leg["current_funding_rate"]) * (24.0 / interval_hours)
-        ex_name = leg.get("exchange", "")
-        client = self.exchanges.get(ex_name)
-        if not client or not hasattr(client, "fetch_funding_rate"):
-            return None
-        try:
-            res = client.fetch_funding_rate(symbol)
-            if not isinstance(res, dict) or res.get("fundingRate") is None:
-                return None
-            live_interval = int(res.get("intervalHours") or interval_hours)
-            return float(res["fundingRate"]) * (24.0 / max(live_interval, 1))
-        except Exception as exc:
-            logger.warning("Failed to fetch funding rate for %s on %s: %s", symbol, ex_name, exc)
-            return None
+    def _should_exit_position(
+        self, pos: Dict[str, Any], now_ms: int, settings: Dict[str, Any]
+    ) -> tuple[Optional[str], List[str]]:
+        return evaluate_position_exit(pos, now_ms, settings, self.exchanges)
 
-    def _should_exit_position(self, pos: Dict[str, Any], now_ms: int, max_hold_days: float) -> Optional[str]:
-        opened_ms = int(pos.get("opened_at_ms") or 0)
-        if opened_ms > 0 and max_hold_days > 0 and (now_ms - opened_ms) >= int(max_hold_days * 86400 * 1000):
-            return "target_hold_days_reached"
-        leg_a, leg_b = pos.get("leg_a", {}), pos.get("leg_b", {})
-        short_24h = self._fetch_leg_funding_24h(leg_b)
-        long_24h = self._fetch_leg_funding_24h(leg_a)
-        if short_24h is None or long_24h is None:
-            return None
-        net_24h = short_24h - long_24h
-        if net_24h < 0:
-            return f"funding_flipped(net_24h={net_24h:.6f})"
-        return None
+    def _report_exit_data_issues(self, pos: Dict[str, Any], issues: List[str], now_ms: int) -> None:
+        base_asset = str(pos.get("base_asset", "UNKNOWN"))
+        if not issues:
+            self._exit_data_alerted_at.pop(base_asset, None)
+            return
+        last_alert_ms = self._exit_data_alerted_at.get(base_asset, 0)
+        if now_ms - last_alert_ms < EXIT_DATA_ALERT_INTERVAL_MS:
+            return
+        self._exit_data_alerted_at[base_asset] = now_ms
+        details = {
+            "base_asset": base_asset,
+            "issue": "; ".join(issues),
+            "action": "exit check skipped; position remains open until data recovers or max hold is reached",
+        }
+        self._record_risk("EXIT_DATA_UNAVAILABLE", "WARNING", details)
+        if not hasattr(self.notifier, "notify_risk_alert"):
+            self.notifier.send(f"[EXIT DATA WARNING] {base_asset}: {details['issue']}; max-hold exit remains active")
 
     def check_exit_conditions(
         self,
         positions: Optional[List[Dict[str, Any]]] = None,
         now_ms: Optional[int] = None,
-        max_hold_days: float = 3.0,
+        max_hold_days: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
-        """Auto-close active positions when funding spread flips negative or hold duration expires."""
+        """Auto-close positions on funding reversal, basis limits, or profile hold duration."""
         import time
 
         curr_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
         exited: List[Dict[str, Any]] = []
+        profile_settings = self._load_exit_profile_settings()
         for pos in self._load_positions(positions):
-            reason = self._should_exit_position(pos, curr_ms, max_hold_days)
+            settings = dict(profile_settings.get(pos.get("profile_id"), {"target_hold_days": 3.0}))
+            if max_hold_days is not None:
+                settings["target_hold_days"] = max_hold_days
+            reason, issues = self._should_exit_position(pos, curr_ms, settings)
+            self._report_exit_data_issues(pos, issues, curr_ms)
             if not reason:
                 continue
             base_asset = pos.get("base_asset", "UNKNOWN")
             self.notifier.send(f"[EXIT] Closing {base_asset}: {reason}")
             self._record_risk("AUTO_EXIT", "INFO", {"base_asset": base_asset, "reason": reason})
-            unwind_res = self._execute_unwind_and_finalize(pos, "AUTO_EXIT")
+            unwind_res = self._execute_unwind_and_finalize(pos, f"AUTO_EXIT:{reason}")
             exited.append({"base_asset": base_asset, "reason": reason, "unwind": unwind_res})
         return exited
 
-    def mark_position_closed(self, base_asset: str) -> None:
+    def mark_position_closed(
+        self,
+        base_asset: str,
+        realized_pnl_usdt: Optional[float] = None,
+        close_reason: Optional[str] = None,
+    ) -> None:
         if self.db_store is not None and hasattr(self.db_store, "close_active_position"):
-            self.db_store.close_active_position(base_asset)
+            self.db_store.close_active_position(base_asset, realized_pnl_usdt, close_reason)
         raw = self.redis.get(REDIS_POSITIONS_KEY)
         if isinstance(raw, bytes):
             raw = raw.decode("utf-8")

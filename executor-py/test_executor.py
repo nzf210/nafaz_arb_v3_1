@@ -62,6 +62,7 @@ class MockExchange:
             "amount": amount,
             "filled": filled,
             "price": price,
+            "average": price,
             "status": status,
         }
         self.orders.append(order)
@@ -173,6 +174,7 @@ def test_consumer_respects_kill_switch_and_asset_lock():
     # Normal execution acquires and releases lock
     res_ok = consumer.process_signal(json.dumps(make_valid_signal(now_ms=now_ms)))
     assert res_ok["status"] == "FILLED_1TO1"
+    assert res_ok["leg_a"]["entry_avg_price"] == res_ok["leg_a"]["price"]
     assert redis.get("core:lock:BTC") is None
 
 
@@ -351,16 +353,14 @@ def test_postgres_store_integration_with_consumer_and_watchdog():
             q = query.strip()
             self.conn.queries.append((q, params))
             if "INSERT INTO active_positions" in q and params:
-                self.conn.active_positions = [
-                    (params[0], params[1], params[2], params[3], params[4])
-                ]
-            elif "UPDATE active_positions SET status = 'CLOSED'" in q:
+                self.conn.active_positions = [tuple(params)]
+            elif "UPDATE active_positions" in q and "status = 'CLOSED'" in q:
                 self.conn.active_positions = []
 
         def fetchall(self):
             last_q = self.conn.queries[-1][0] if self.conn.queries else ""
             if "FROM runtime_settings" in last_q:
-                return [("funding_carry_core", True, True, 250.0, 500.0)]
+                return [("funding_carry_core", True, True, 250.0, 500.0, 7.0, None, None)]
             if "FROM active_positions" in last_q:
                 return list(self.conn.active_positions)
             return []
@@ -402,6 +402,7 @@ def test_postgres_store_integration_with_consumer_and_watchdog():
 
     # Watchdog loads positions from Postgres fallback when Redis core:positions is cleared
     redis.delete("core:positions")
+    assert store.load_active_positions()[0]["opened_at_ms"] == now_ms
     ex_okx.positions = [{"symbol": "BTC/USDT:USDT", "contracts": 0.004}]
     ex_bybit.positions = [{"symbol": "BTC/USDT:USDT", "contracts": 0.001}]
     watchdog = RiskWatchdog(redis, exchanges={"okx": ex_okx, "bybit": ex_bybit}, db_store=store)

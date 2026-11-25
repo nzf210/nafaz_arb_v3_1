@@ -6,13 +6,37 @@ CREATE TABLE IF NOT EXISTS runtime_settings (
     dry_run BOOLEAN NOT NULL DEFAULT TRUE,
     canary_max_notional_usdt DOUBLE PRECISION,
     max_notional_usdt DOUBLE PRECISION,
+    target_hold_days DOUBLE PRECISION,
+    basis_target_spread DOUBLE PRECISION,
+    basis_adverse_stop_spread DOUBLE PRECISION,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-INSERT INTO runtime_settings (profile_id, enabled, dry_run, canary_max_notional_usdt, max_notional_usdt)
+ALTER TABLE runtime_settings ADD COLUMN IF NOT EXISTS target_hold_days DOUBLE PRECISION;
+ALTER TABLE runtime_settings ADD COLUMN IF NOT EXISTS basis_target_spread DOUBLE PRECISION;
+ALTER TABLE runtime_settings ADD COLUMN IF NOT EXISTS basis_adverse_stop_spread DOUBLE PRECISION;
+
+UPDATE runtime_settings
+SET target_hold_days = CASE profile_id
+    WHEN 'funding_carry_core' THEN 7.0
+    WHEN 'basis_convergence_fast' THEN 1.0
+    ELSE 3.0
+END
+WHERE target_hold_days IS NULL;
+
+UPDATE runtime_settings
+SET basis_target_spread = 0.001,
+    basis_adverse_stop_spread = 0.005
+WHERE profile_id = 'basis_convergence_fast'
+  AND (basis_target_spread IS NULL OR basis_adverse_stop_spread IS NULL);
+
+INSERT INTO runtime_settings (
+    profile_id, enabled, dry_run, canary_max_notional_usdt, max_notional_usdt,
+    target_hold_days, basis_target_spread, basis_adverse_stop_spread
+)
 VALUES
-    ('funding_carry_core', TRUE, TRUE, 20.0, 1000.0),
-    ('basis_convergence_fast', TRUE, TRUE, 20.0, 1000.0)
+    ('funding_carry_core', TRUE, TRUE, 20.0, 1000.0, 7.0, NULL, NULL),
+    ('basis_convergence_fast', TRUE, TRUE, 20.0, 1000.0, 1.0, 0.001, 0.005)
 ON CONFLICT (profile_id) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS signal_audit (
@@ -49,8 +73,22 @@ CREATE TABLE IF NOT EXISTS active_positions (
     leg_a JSONB NOT NULL,
     leg_b JSONB NOT NULL,
     status TEXT NOT NULL DEFAULT 'OPEN',
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    opened_at_ms BIGINT NOT NULL DEFAULT ((EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT),
+    realized_pnl_usdt DOUBLE PRECISION,
+    close_reason TEXT,
+    closed_at TIMESTAMPTZ
 );
+
+ALTER TABLE active_positions ADD COLUMN IF NOT EXISTS opened_at_ms BIGINT;
+ALTER TABLE active_positions ADD COLUMN IF NOT EXISTS realized_pnl_usdt DOUBLE PRECISION;
+ALTER TABLE active_positions ADD COLUMN IF NOT EXISTS close_reason TEXT;
+ALTER TABLE active_positions ADD COLUMN IF NOT EXISTS closed_at TIMESTAMPTZ;
+UPDATE active_positions
+SET opened_at_ms = (EXTRACT(EPOCH FROM updated_at) * 1000)::BIGINT
+WHERE opened_at_ms IS NULL;
+ALTER TABLE active_positions ALTER COLUMN opened_at_ms SET DEFAULT ((EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT);
+ALTER TABLE active_positions ALTER COLUMN opened_at_ms SET NOT NULL;
 
 CREATE TABLE IF NOT EXISTS risk_events (
     id BIGSERIAL PRIMARY KEY,

@@ -355,8 +355,14 @@ class TelegramBot:
                 m_adl = max(adl_a, adl_b)
                 if m_adl > 0:
                     adls.append({"base_asset": pos.get("base_asset"), "adl_rank": m_adl})
-            drifts = self.watchdog.reconcile_positions().get("drifts", [])
-        return {"margins": margins, "adls": adls, "drifts": drifts}
+            reconciliation = self.watchdog.reconcile_positions()
+            return {
+                "margins": margins,
+                "adls": adls,
+                "drifts": reconciliation.get("drifts", []),
+                "unavailable": reconciliation.get("unavailable", []),
+            }
+        return {"margins": margins, "adls": adls, "drifts": drifts, "unavailable": []}
 
     def trigger_reconciliation(self) -> Dict[str, Any]:
         if self.watchdog:
@@ -399,8 +405,8 @@ class TelegramBot:
             return {"status": "NOT_FOUND", "error": f"Posisi {base_asset} tidak ditemukan."}
         if self.executor:
             res = self.executor.unwind_route(pos, dry_run=self.dry_run)
-            if self.watchdog:
-                self.watchdog.mark_position_closed(base_asset)
+            if self.watchdog and not self.dry_run:
+                self.watchdog.finalize_verified_close(pos, res, "MANUAL_FORCE_CLOSE")
             return res
         return {"status": "NO_EXECUTOR", "error": "Executor client tidak terhubung."}
 

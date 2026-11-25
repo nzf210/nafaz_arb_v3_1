@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import time
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -57,18 +58,26 @@ class PostgresStore:
             return {}
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT profile_id, enabled, dry_run, canary_max_notional_usdt, max_notional_usdt "
-                "FROM runtime_settings"
+                "SELECT profile_id, enabled, dry_run, canary_max_notional_usdt, max_notional_usdt, "
+                "target_hold_days, basis_target_spread, basis_adverse_stop_spread FROM runtime_settings"
             )
             rows = cur.fetchall()
         profiles: Dict[str, Dict[str, Any]] = {}
         for row in rows:
-            pid, enabled, dry_run, canary_cap, max_notional = row
+            (
+                pid, enabled, dry_run, canary_cap, max_notional, target_hold_days,
+                basis_target_spread, basis_adverse_stop_spread,
+            ) = row
             profiles[str(pid)] = {
                 "enabled": bool(enabled),
                 "dry_run": bool(dry_run),
                 "canary_max_notional_usdt": float(canary_cap) if canary_cap is not None else None,
                 "max_notional_usdt": float(max_notional) if max_notional is not None else None,
+                "target_hold_days": float(target_hold_days) if target_hold_days is not None else None,
+                "basis_target_spread": float(basis_target_spread) if basis_target_spread is not None else None,
+                "basis_adverse_stop_spread": (
+                    float(basis_adverse_stop_spread) if basis_adverse_stop_spread is not None else None
+                ),
             }
         return profiles
 
@@ -121,6 +130,9 @@ class PostgresStore:
             **(result.get("leg_b") or sig_legs.get("leg_b", {})),
             "interval_hours": sig_legs.get("leg_b", {}).get("interval_hours", 8),
         }
+        opened_at_ms = int(
+            result.get("opened_at_ms") or signal.get("generated_at_ms") or time.time() * 1000
+        )
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -151,15 +163,20 @@ class PostgresStore:
             ) and qty > 0:
                 cur.execute(
                     """
-                    INSERT INTO active_positions (base_asset, profile_id, qty, leg_a, leg_b, status, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, 'OPEN', NOW())
+                    INSERT INTO active_positions (
+                        base_asset, profile_id, qty, leg_a, leg_b, status, updated_at, opened_at_ms
+                    ) VALUES (%s, %s, %s, %s, %s, 'OPEN', NOW(), %s)
                     ON CONFLICT (base_asset) DO UPDATE SET
                         profile_id = EXCLUDED.profile_id,
                         qty = EXCLUDED.qty,
                         leg_a = EXCLUDED.leg_a,
                         leg_b = EXCLUDED.leg_b,
                         status = 'OPEN',
-                        updated_at = NOW()
+                        updated_at = NOW(),
+                        opened_at_ms = EXCLUDED.opened_at_ms,
+                        realized_pnl_usdt = NULL,
+                        close_reason = NULL,
+                        closed_at = NULL
                     """,
                     (
                         str(signal["base_asset"]),
@@ -167,6 +184,7 @@ class PostgresStore:
                         qty,
                         json.dumps(leg_a),
                         json.dumps(leg_b),
+                        opened_at_ms,
                     ),
                 )
 
@@ -176,14 +194,21 @@ class PostgresStore:
                 return True
         return False
 
-    def close_active_position(self, base_asset: str) -> None:
+    def close_active_position(
+        self, base_asset: str, realized_pnl_usdt: Optional[float] = None, close_reason: Optional[str] = None
+    ) -> None:
         conn = self._get_conn()
         if conn is None:
             return
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE active_positions SET status = 'CLOSED', updated_at = NOW() WHERE base_asset = %s",
-                (str(base_asset),),
+                """
+                UPDATE active_positions
+                SET status = 'CLOSED', realized_pnl_usdt = %s, close_reason = %s,
+                    closed_at = NOW(), updated_at = NOW()
+                WHERE base_asset = %s
+                """,
+                (realized_pnl_usdt, close_reason, str(base_asset)),
             )
 
     def load_active_positions(self) -> List[Dict[str, Any]]:
@@ -192,11 +217,12 @@ class PostgresStore:
             return []
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT base_asset, profile_id, qty, leg_a, leg_b FROM active_positions WHERE status = 'OPEN'"
+                "SELECT base_asset, profile_id, qty, leg_a, leg_b, opened_at_ms "
+                "FROM active_positions WHERE status = 'OPEN'"
             )
             rows = cur.fetchall()
         positions: List[Dict[str, Any]] = []
-        for base_asset, profile_id, qty, leg_a, leg_b in rows:
+        for base_asset, profile_id, qty, leg_a, leg_b, opened_at_ms in rows:
             positions.append(
                 {
                     "base_asset": base_asset,
@@ -204,6 +230,7 @@ class PostgresStore:
                     "qty": float(qty),
                     "leg_a": json.loads(leg_a) if isinstance(leg_a, str) else leg_a,
                     "leg_b": json.loads(leg_b) if isinstance(leg_b, str) else leg_b,
+                    "opened_at_ms": int(opened_at_ms),
                 }
             )
         return positions

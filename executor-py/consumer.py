@@ -210,6 +210,7 @@ class SignalConsumer:
             "DRY_RUN",
             "DRY_RUN_Simulated",
         ) and qty > 0:
+            result.setdefault("opened_at_ms", self.clock_ms())
             self._upsert_redis_position(signal, result, qty)
             if self.notifier and hasattr(self.notifier, "notify_position_opened"):
                 try:
@@ -240,7 +241,7 @@ class SignalConsumer:
             "base_asset": base_asset,
             "profile_id": signal["profile_id"],
             "qty": qty,
-            "opened_at_ms": self.clock_ms(),
+            "opened_at_ms": int(result["opened_at_ms"]),
             "leg_a": {
                 **leg_a,
                 "interval_hours": signal["legs"]["leg_a"].get("interval_hours", 8),

@@ -188,10 +188,11 @@ def test_callbacks_and_force_close(bot_setup):
     assert any("Konfirmasi Tutup Paksa" in msg for msg in bot.outbox)
 
     # Callback confirm force close
+    bot.dry_run = False
     th.dispatch_callback(bot, -1001234567890, 111222, "cb3", "confirm_fc:BTC")
     assert any("Tutup Paksa BTC Berhasil" in msg for msg in bot.outbox)
     executor.unwind_route.assert_called_once()
-    watchdog.mark_position_closed.assert_called_with("BTC")
+    watchdog.finalize_verified_close.assert_called_once()
 
 
 def test_push_notifications(bot_setup):
@@ -211,5 +212,14 @@ def test_push_notifications(bot_setup):
     assert any("POSISI ARBITRASE TERBUKA" in msg and "ETH" in msg for msg in bot.outbox)
 
     bot.outbox.clear()
-    bot.notify_position_closed({"status": "UNWOUND_VERIFIED", "verified_flat": True}, "ETH")
+    bot.notify_position_closed(
+        {
+            "status": "UNWOUND_VERIFIED",
+            "verified_flat": True,
+            "realized_pnl_usdt": 1.25,
+            "close_reason": "AUTO_EXIT",
+        },
+        "ETH",
+    )
     assert any("POSISI SELESAI DITUTUP" in msg and "ETH" in msg for msg in bot.outbox)
+    assert any("1.2500 USDT" in msg and "AUTO_EXIT" in msg for msg in bot.outbox)
