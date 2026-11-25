@@ -275,6 +275,7 @@ type SignalPublisher struct {
 	publishedCountMu sync.Mutex
 	publishedCount   int64
 	droppedCount     int64
+	needsReset       bool
 }
 
 func NewSignalPublisher(store KVStore, cfg domain.EngineConfig) *SignalPublisher {
@@ -372,10 +373,30 @@ func (p *SignalPublisher) UpdateCollateralSnapshot(ctx context.Context, snap *do
 }
 
 func (p *SignalPublisher) ResetRejectionStats(ctx context.Context) error {
-	return p.store.Del(ctx, domain.KeyMetaRejectionStats)
+	p.publishedCountMu.Lock()
+	p.needsReset = true
+	p.publishedCountMu.Unlock()
+	if err := p.store.Del(ctx, domain.KeyMetaRejectionStats); err != nil {
+		return err
+	}
+	p.publishedCountMu.Lock()
+	p.needsReset = false
+	p.publishedCountMu.Unlock()
+	return nil
 }
 
 func (p *SignalPublisher) RecordRejectionStats(ctx context.Context, stats map[string]int64) error {
+	p.publishedCountMu.Lock()
+	needsReset := p.needsReset
+	p.publishedCountMu.Unlock()
+	if needsReset {
+		if err := p.store.Del(ctx, domain.KeyMetaRejectionStats); err != nil {
+			return err
+		}
+		p.publishedCountMu.Lock()
+		p.needsReset = false
+		p.publishedCountMu.Unlock()
+	}
 	for reason, count := range stats {
 		if count <= 0 {
 			continue
