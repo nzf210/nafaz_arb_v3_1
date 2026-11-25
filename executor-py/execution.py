@@ -147,7 +147,7 @@ class DeltaNeutralExecutor:
         return float(_to_dec(base_qty) / _to_dec(ct_size)), ct_size
 
     def _resolve_filled_base(
-        self, client: Any, symbol: str, order: Dict[str, Any], req_order_amt: float, ct_size: float
+        self, client: Any, symbol: str, order: Dict[str, Any], _req_order_amt: float, ct_size: float
     ) -> tuple[float, str]:
         order_id = order.get("id")
         filled_raw = order.get("filled")
@@ -164,14 +164,21 @@ class DeltaNeutralExecutor:
         filled_amt = float(filled_raw) if filled_raw is not None else 0.0
         return float(_to_dec(filled_amt) * _to_dec(ct_size)), (status or "unknown")
 
-    def check_sufficient_balance(self, exchange: str, required_usdt: float) -> bool:
+    def _has_credentials(self, exchange: str) -> bool:
+        client = self.exchanges.get(exchange)
+        return bool(client and getattr(client, "apiKey", "ok"))
+
+    def check_sufficient_balance(self, exchange: str, required_usdt: float, symbol: str = "") -> bool:
         """Verify exchange has enough free USDT balance when fetch_balance is available."""
         client = self.exchanges.get(exchange)
-        if not client or not hasattr(client, "fetch_balance"):
+        if not client or not hasattr(client, "fetch_balance") or not self._has_credentials(exchange):
             logger.error("Cannot verify free USDT balance on %s; rejecting live execution", exchange)
             return False
         try:
-            bal = client.fetch_balance()
+            try:
+                bal = client.fetch_balance({"type": "swap"}) if PERP_SUFFIX in symbol else client.fetch_balance()
+            except TypeError:
+                bal = client.fetch_balance()
             free_usdt = bal.get("free", {}).get("USDT")
             if free_usdt is None:
                 free_usdt = bal.get("USDT", {}).get("free")
@@ -183,11 +190,22 @@ class DeltaNeutralExecutor:
             logger.warning("Failed to check balance on %s: %s", exchange, exc)
             return False
 
+    def _submit_entry_order(
+        self, client: Any, symbol: str, ord_type: str, side: str, amount: float, price: Optional[float]
+    ) -> Dict[str, Any]:
+        try:
+            return client.create_order(symbol, ord_type, side, amount, price)
+        except Exception as exc:
+            if PERP_SUFFIX in symbol and ("posside" in str(exc).lower() or "51000" in str(exc)):
+                pos_side = "long" if side.lower() == "buy" else "short"
+                return client.create_order(symbol, ord_type, side, amount, price, {"posSide": pos_side})
+            raise
+
     def _place_leg_a(
         self, ex_a: str, client_a: Any, sym_a: str, side_a: str, qty: float, price_a: float
     ) -> tuple[Dict[str, Any], float, bool]:
         ord_amt_a, ct_size_a = self._to_order_amount(ex_a, sym_a, qty)
-        order_a = client_a.create_order(sym_a, "limit", side_a, ord_amt_a, price_a)
+        order_a = self._submit_entry_order(client_a, sym_a, "limit", side_a, ord_amt_a, price_a)
         order_a_id = order_a.get("id", "ord_a")
         filled_a, status_a = self._resolve_filled_base(client_a, sym_a, order_a, ord_amt_a, ct_size_a)
         cancelled_unfilled_a = False
@@ -218,7 +236,7 @@ class DeltaNeutralExecutor:
                 ord_type = "limit" if attempt == 0 else "market"
                 ord_price = self._leg_b_order_price(ord_type, side_b, sym_b, price_b)
                 ord_amt_b, ct_size_b = self._to_order_amount(ex_b, sym_b, remaining_b)
-                order_b = client_b.create_order(sym_b, ord_type, side_b, ord_amt_b, ord_price)
+                order_b = self._submit_entry_order(client_b, sym_b, ord_type, side_b, ord_amt_b, ord_price)
                 step_fill, _ = self._resolve_filled_base(client_b, sym_b, order_b, ord_amt_b, ct_size_b)
                 if step_fill < remaining_b and order_b.get("id"):
                     self._try_cancel(client_b, order_b["id"], sym_b)
@@ -236,90 +254,95 @@ class DeltaNeutralExecutor:
         except Exception:
             pass
 
+    def _check_live_leg_readiness(self, signal_id: str, leg_key: str, ex_name: str, sym: str, req_usdt: float) -> Optional[Dict[str, Any]]:
+        if not self._has_credentials(ex_name):
+            return {"status": "REJECTED", "reason": f"missing_credentials_{leg_key}", "signal_id": signal_id, "exchange": ex_name}
+        if not self.check_sufficient_balance(ex_name, req_usdt, sym):
+            return {"status": "REJECTED", "reason": f"insufficient_balance_{leg_key}", "signal_id": signal_id, "exchange": ex_name}
+        return None
+
+    def _check_both_legs_credentials(self, signal_id: str, ex_a: str, ex_b: str) -> Optional[Dict[str, Any]]:
+        for lk, ex_name in (("leg_a", ex_a), ("leg_b", ex_b)):
+            if not self._has_credentials(ex_name):
+                return {"status": "REJECTED", "reason": f"missing_credentials_{lk}", "signal_id": signal_id, "exchange": ex_name}
+        return None
+
+    def _check_both_legs_balances(self, signal_id: str, ex_a: str, sym_a: str, req_a: float, ex_b: str, sym_b: str, req_b: float) -> Optional[Dict[str, Any]]:
+        return (
+            self._check_live_leg_readiness(signal_id, "leg_a", ex_a, sym_a, req_a)
+            or self._check_live_leg_readiness(signal_id, "leg_b", ex_b, sym_b, req_b)
+        )
+
+    def _execute_live_legs(
+        self, signal: Dict[str, Any], leg_a: Dict[str, Any], leg_b: Dict[str, Any],
+        sym_a: str, sym_b: str, side_a: str, side_b: str,
+        price_a: float, price_b: float, qty: float, step_a: float, step_b: float,
+    ) -> Dict[str, Any]:
+        client_a, client_b = self.exchanges[leg_a["exchange"]], self.exchanges[leg_b["exchange"]]
+        try:
+            order_a, filled_a, cancelled_unfilled_a = self._place_leg_a(leg_a["exchange"], client_a, sym_a, side_a, qty, price_a)
+        except Exception as exc:
+            logger.warning("Leg A order failed on %s (%s): %s", leg_a["exchange"], sym_a, exc)
+            return {"status": "REJECTED", "reason": "leg_a_order_error", "detail": str(exc), "signal_id": signal["signal_id"], "exchange": leg_a["exchange"]}
+
+        if filled_a <= 0:
+            return {"status": "ABORTED_ZERO_FILL_A", "signal_id": signal["signal_id"], "qty_requested": qty, "qty_filled_a": 0.0, "qty_filled_b": 0.0, "cancelled_unfilled_a": cancelled_unfilled_a}
+
+        target_qty_b = round_qty(filled_a, compatible_step_size(step_a, step_b))
+        if target_qty_b <= 0:
+            unwind_order = self._emergency_unwind(leg_a["exchange"], client_a, sym_a, side_a, filled_a)
+            return {"status": "EMERGENCY_UNWOUND", "signal_id": signal["signal_id"], "reason": "filled_a_below_step_size", "unwound_qty_a": filled_a, "unwind_order": unwind_order}
+
+        filled_b, order_b, last_error = self._fill_leg_b_with_retries(leg_b["exchange"], client_b, sym_b, side_b, target_qty_b, price_b)
+        unhedged_a = float(_to_dec(filled_a) - _to_dec(filled_b))
+        if unhedged_a > 0:
+            return self._handle_unhedged_leg_a(signal, client_a, sym_a, side_a, leg_a["exchange"], qty, filled_a, filled_b, unhedged_a, cancelled_unfilled_a, last_error)
+
+        status = "FILLED_1TO1" if filled_a == qty else "PARTIAL_FILLED_1TO1"
+        if self.notifier:
+            self.notifier(f"[EXEC] {status} {signal['base_asset']} qty={filled_a}")
+        return {
+            "status": status, "signal_id": signal["signal_id"], "base_asset": signal["base_asset"],
+            "qty": filled_a, "qty_requested": qty, "qty_filled_a": filled_a, "qty_filled_b": filled_b,
+            "price_a": price_a, "price_b": price_b,
+            "leg_a": {"exchange": leg_a["exchange"], "symbol": sym_a, "side": side_a, "price": price_a, "qty": filled_a},
+            "leg_b": {"exchange": leg_b["exchange"], "symbol": sym_b, "side": side_b, "price": price_b, "qty": filled_b},
+            "cancelled_unfilled_a": cancelled_unfilled_a, "order_a": order_a, "order_b": order_b,
+        }
+
     def execute_signal(
         self,
         signal: Dict[str, Any],
         dry_run: bool = False,
         effective_notional_usdt: Optional[float] = None,
     ) -> Dict[str, Any]:
-        legs = signal["legs"]
-        leg_a, leg_b = legs["leg_a"], legs["leg_b"]
-        notional = float(
-            effective_notional_usdt if effective_notional_usdt is not None else signal["target_notional_usdt"]
-        )
+        leg_a, leg_b = signal["legs"]["leg_a"], signal["legs"]["leg_b"]
+        notional = float(effective_notional_usdt if effective_notional_usdt is not None else signal["target_notional_usdt"])
         sym_a = leg_a.get("canon_symbol") or leg_a["raw_symbol"]
         sym_b = leg_b.get("canon_symbol") or leg_b["raw_symbol"]
-        gr_a = self.get_guardrail(leg_a["exchange"], sym_a)
-        gr_b = self.get_guardrail(leg_b["exchange"], sym_b)
+        gr_a, gr_b = self.get_guardrail(leg_a["exchange"], sym_a), self.get_guardrail(leg_b["exchange"], sym_b)
         side_a, side_b = action_to_side(leg_a["action"]), action_to_side(leg_b["action"])
         if side_a == side_b:
             raise ValueError("Delta-neutral route requires opposite sides on leg_a and leg_b")
+        if not dry_run:
+            cred_rej = self._check_both_legs_credentials(signal["signal_id"], leg_a["exchange"], leg_b["exchange"])
+            if cred_rej:
+                return cred_rej
 
         price_a = round_price(float(leg_a["vwap_price"]), gr_a["tick_size"], side_a)
         price_b = round_price(float(leg_b["vwap_price"]), gr_b["tick_size"], side_b)
-        qty = compute_1to1_qty(notional, price_a, price_b, gr_a, gr_b)
+        try:
+            qty = compute_1to1_qty(notional, price_a, price_b, gr_a, gr_b)
+        except ValueError as exc:
+            return {"status": "REJECTED", "reason": "canary_below_min_lot", "detail": str(exc), "signal_id": signal["signal_id"]}
 
         if dry_run:
             return self._record_dry_run(signal, notional, qty, leg_a, leg_b, sym_a, sym_b, side_a, side_b, price_a, price_b)
 
-        if not self.check_sufficient_balance(leg_a["exchange"], qty * price_a):
-            return {"status": "REJECTED", "reason": "insufficient_balance_leg_a", "signal_id": signal["signal_id"], "exchange": leg_a["exchange"]}
-        if not self.check_sufficient_balance(leg_b["exchange"], qty * price_b):
-            return {"status": "REJECTED", "reason": "insufficient_balance_leg_b", "signal_id": signal["signal_id"], "exchange": leg_b["exchange"]}
-
-        client_a, client_b = self.exchanges[leg_a["exchange"]], self.exchanges[leg_b["exchange"]]
-        order_a, filled_a, cancelled_unfilled_a = self._place_leg_a(
-            leg_a["exchange"], client_a, sym_a, side_a, qty, price_a
-        )
-        if filled_a <= 0:
-            return {
-                "status": "ABORTED_ZERO_FILL_A",
-                "signal_id": signal["signal_id"],
-                "qty_requested": qty,
-                "qty_filled_a": 0.0,
-                "qty_filled_b": 0.0,
-                "cancelled_unfilled_a": cancelled_unfilled_a,
-            }
-
-        target_qty_b = round_qty(filled_a, compatible_step_size(gr_a["step_size"], gr_b["step_size"]))
-        if target_qty_b <= 0:
-            unwind_order = self._emergency_unwind(leg_a["exchange"], client_a, sym_a, side_a, filled_a)
-            return {
-                "status": "EMERGENCY_UNWOUND",
-                "signal_id": signal["signal_id"],
-                "reason": "filled_a_below_step_size",
-                "unwound_qty_a": filled_a,
-                "unwind_order": unwind_order,
-            }
-
-        filled_b, order_b, last_error = self._fill_leg_b_with_retries(
-            leg_b["exchange"], client_b, sym_b, side_b, target_qty_b, price_b
-        )
-        unhedged_a = float(_to_dec(filled_a) - _to_dec(filled_b))
-        if unhedged_a > 0:
-            return self._handle_unhedged_leg_a(
-                signal, client_a, sym_a, side_a, leg_a["exchange"], qty, filled_a, filled_b, unhedged_a, cancelled_unfilled_a, last_error
-            )
-
-        status = "FILLED_1TO1" if filled_a == qty else "PARTIAL_FILLED_1TO1"
-        if self.notifier:
-            self.notifier(f"[EXEC] {status} {signal['base_asset']} qty={filled_a}")
-        return {
-            "status": status,
-            "signal_id": signal["signal_id"],
-            "base_asset": signal["base_asset"],
-            "qty": filled_a,
-            "qty_requested": qty,
-            "qty_filled_a": filled_a,
-            "qty_filled_b": filled_b,
-            "price_a": price_a,
-            "price_b": price_b,
-            "leg_a": {"exchange": leg_a["exchange"], "symbol": sym_a, "side": side_a, "price": price_a, "qty": filled_a},
-            "leg_b": {"exchange": leg_b["exchange"], "symbol": sym_b, "side": side_b, "price": price_b, "qty": filled_b},
-            "cancelled_unfilled_a": cancelled_unfilled_a,
-            "order_a": order_a,
-            "order_b": order_b,
-        }
+        bal_rej = self._check_both_legs_balances(signal["signal_id"], leg_a["exchange"], sym_a, qty * price_a, leg_b["exchange"], sym_b, qty * price_b)
+        if bal_rej:
+            return bal_rej
+        return self._execute_live_legs(signal, leg_a, leg_b, sym_a, sym_b, side_a, side_b, price_a, price_b, qty, gr_a["step_size"], gr_b["step_size"])
 
     def _record_dry_run(
         self, signal: Dict[str, Any], notional: float, qty: float,
@@ -377,9 +400,27 @@ class DeltaNeutralExecutor:
                 raise RuntimeError(
                     f"{exchange} client rejected reduceOnly; refusing an unsafe non-reduce-only close"
                 ) from exc
+            except Exception as exc:
+                if "posside" in str(exc).lower() or "51000" in str(exc):
+                    pos_side = "long" if close_side.lower() == "sell" else "short"
+                    return client.create_order(symbol, "market", close_side, ord_amt, None, {"reduceOnly": True, "posSide": pos_side})
+                raise
         if close_side == "buy" and ref_price is not None and ref_price > 0:
             return client.create_order(symbol, "market", close_side, ord_amt, ref_price)
         return client.create_order(symbol, "market", close_side, ord_amt, None)
+
+    @staticmethod
+    def _position_base_qty(client: Any, symbol: str, position: Dict[str, Any]) -> float:
+        info = position.get("info") or {}
+        if (position.get("symbol") or info.get("symbol")) != symbol:
+            return 0.0
+        contracts = position.get("contracts")
+        if contracts is None:
+            contracts = position.get("amount", 0.0)
+        contract_size = position.get("contractSize")
+        if contract_size is None and getattr(client, "markets", None):
+            contract_size = (client.markets.get(symbol) or {}).get("contractSize")
+        return abs(float(contracts or 0.0) * float(contract_size or 1.0))
 
     def _perpetual_position_is_flat(self, client: Any, symbol: str) -> bool:
         if not hasattr(client, "fetch_positions"):
@@ -387,46 +428,31 @@ class DeltaNeutralExecutor:
         positions = client.fetch_positions([symbol])
         if not isinstance(positions, list):
             return False
-        for position in positions:
-            info = position.get("info") or {}
-            position_symbol = position.get("symbol") or info.get("symbol")
-            if position_symbol != symbol:
-                continue
-            contracts = position.get("contracts")
-            if contracts is None:
-                contracts = position.get("amount", 0.0)
-            contract_size = position.get("contractSize")
-            if contract_size is None and getattr(client, "markets", None):
-                contract_size = (client.markets.get(symbol) or {}).get("contractSize")
-            base_qty = abs(float(contracts or 0.0) * float(contract_size or 1.0))
-            if base_qty > 1e-10:
-                return False
-        return True
+        return all(self._position_base_qty(client, symbol, pos) <= 1e-10 for pos in positions)
 
     def _close_leg_and_verify(
-        self,
-        exchange: str,
-        client: Any,
-        symbol: str,
-        close_side: str,
-        base_qty: float,
-        ref_price: Optional[float],
+        self, exchange: str, client: Any, symbol: str, close_side: str, base_qty: float, ref_price: Optional[float]
     ) -> tuple[Optional[Dict[str, Any]], bool, str]:
         order = self._create_close_order(exchange, client, symbol, close_side, base_qty, ref_price)
         order_amount, contract_size = self._to_order_amount(exchange, symbol, base_qty)
-        filled_base, order_status = self._resolve_filled_base(
-            client, symbol, order, order_amount, contract_size
-        )
+        filled_base, order_status = self._resolve_filled_base(client, symbol, order, order_amount, contract_size)
         if filled_base + 1e-10 < base_qty:
             return order, False, f"close_fill_incomplete:{filled_base}/{base_qty}"
         if PERP_SUFFIX in symbol and not self._perpetual_position_is_flat(client, symbol):
             return order, False, "exchange_position_not_flat"
         return order, True, order_status
 
+    def _safe_close_leg(self, leg: Dict[str, Any], sym: str, close_side: str, qty: float) -> tuple[Optional[Dict[str, Any]], bool, str]:
+        client = self.exchanges[leg["exchange"]]
+        ref_price = float(leg.get("price") or leg.get("vwap_price") or 0.0) or None
+        try:
+            return self._close_leg_and_verify(leg["exchange"], client, sym, close_side, qty, ref_price)
+        except Exception as exc:
+            return None, False, f"close_error:{exc}"
+
     def unwind_route(self, position: Dict[str, Any], dry_run: bool = False) -> Dict[str, Any]:
         """Close both legs and report success only after close fills are verified."""
-        leg_a = position["leg_a"]
-        leg_b = position["leg_b"]
+        leg_a, leg_b = position["leg_a"], position["leg_b"]
         qty = float(position["qty"])
         close_side_a = opposite_side(action_to_side(leg_a.get("side") or leg_a.get("action")))
         close_side_b = opposite_side(action_to_side(leg_b.get("side") or leg_b.get("action")))
@@ -434,48 +460,22 @@ class DeltaNeutralExecutor:
         sym_b = leg_b.get("symbol") or leg_b.get("canon_symbol") or leg_b["raw_symbol"]
 
         if dry_run:
-            res = {
-                "status": "DRY_RUN_UNWOUND",
-                "base_asset": position.get("base_asset"),
-                "qty": qty,
-                "leg_a_close_side": close_side_a,
-                "leg_b_close_side": close_side_b,
-            }
+            res = {"status": "DRY_RUN_UNWOUND", "base_asset": position.get("base_asset"), "qty": qty, "leg_a_close_side": close_side_a, "leg_b_close_side": close_side_b}
             self.dry_run_log.append(res)
             return res
 
-        client_a = self.exchanges[leg_a["exchange"]]
-        client_b = self.exchanges[leg_b["exchange"]]
-        ref_a = float(leg_a.get("price") or leg_a.get("vwap_price") or 0.0) or None
-        ref_b = float(leg_b.get("price") or leg_b.get("vwap_price") or 0.0) or None
-        try:
-            order_a, verified_a, detail_a = self._close_leg_and_verify(
-                leg_a["exchange"], client_a, sym_a, close_side_a, qty, ref_a
-            )
-        except Exception as exc:
-            order_a, verified_a, detail_a = None, False, f"close_error:{exc}"
-        try:
-            order_b, verified_b, detail_b = self._close_leg_and_verify(
-                leg_b["exchange"], client_b, sym_b, close_side_b, qty, ref_b
-            )
-        except Exception as exc:
-            order_b, verified_b, detail_b = None, False, f"close_error:{exc}"
+        order_a, verified_a, detail_a = self._safe_close_leg(leg_a, sym_a, close_side_a, qty)
+        order_b, verified_b, detail_b = self._safe_close_leg(leg_b, sym_b, close_side_b, qty)
         verified = verified_a and verified_b
         status = "UNWOUND_VERIFIED" if verified else "UNWIND_PENDING"
         if self.notifier:
             level = "UNWIND VERIFIED" if verified else "UNWIND RECONCILIATION REQUIRED"
             self.notifier(f"[{level}] {position.get('base_asset', '')} qty={qty}")
         return {
-            "status": status,
-            "base_asset": position.get("base_asset"),
-            "qty": qty,
-            "order_a": order_a,
-            "order_b": order_b,
-            "verified_flat": verified,
-            "leg_a_verified": verified_a,
-            "leg_b_verified": verified_b,
-            "leg_a_detail": detail_a,
-            "leg_b_detail": detail_b,
+            "status": status, "base_asset": position.get("base_asset"), "qty": qty,
+            "order_a": order_a, "order_b": order_b, "verified_flat": verified,
+            "leg_a_verified": verified_a, "leg_b_verified": verified_b,
+            "leg_a_detail": detail_a, "leg_b_detail": detail_b,
         }
 
     close_route = unwind_route

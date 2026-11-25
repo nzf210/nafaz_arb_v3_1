@@ -93,7 +93,7 @@ class PostgresStore:
                     str(signal.get("profile_id", "unknown")),
                     str(signal.get("route_type", "unknown")),
                     str(signal.get("base_asset", "unknown")),
-                    float(signal.get("target_notional_usdt", 0.0)),
+                    float(result.get("effective_notional_usdt") or signal.get("target_notional_usdt", 0.0)),
                     str(result.get("status", "UNKNOWN")),
                     result.get("reason"),
                     json.dumps(signal),
@@ -258,26 +258,33 @@ class PostgresStore:
             cur.execute(
                 """
                 SELECT signal_id, profile_id, route_type, base_asset,
-                       target_notional_usdt, status, reason, created_at
+                       target_notional_usdt, status, reason, created_at, result
                 FROM signal_audit
                 ORDER BY created_at DESC LIMIT %s
                 """,
                 (limit,),
             )
             rows = cur.fetchall()
-            return [
-                {
-                    "signal_id": r[0],
-                    "profile_id": r[1],
-                    "route_type": r[2],
-                    "base_asset": r[3],
-                    "target_notional_usdt": float(r[4]),
-                    "status": r[5],
-                    "reason": r[6],
-                    "created_at": str(r[7]),
-                }
-                for r in rows
-            ]
+            out: List[Dict[str, Any]] = []
+            for r in rows:
+                raw_res = r[8] if len(r) > 8 else None
+                res_obj = json.loads(raw_res) if isinstance(raw_res, str) else (raw_res or {})
+                eff = res_obj.get("effective_notional_usdt") if isinstance(res_obj, dict) else None
+                ex = res_obj.get("exchange") if isinstance(res_obj, dict) else None
+                out.append(
+                    {
+                        "signal_id": r[0],
+                        "profile_id": r[1],
+                        "route_type": r[2],
+                        "base_asset": r[3],
+                        "target_notional_usdt": float(eff if eff is not None else r[4]),
+                        "status": r[5],
+                        "reason": r[6],
+                        "exchange": ex,
+                        "created_at": str(r[7]),
+                    }
+                )
+            return out
 
     def list_recent_risk_events(self, limit: int = 10) -> List[Dict[str, Any]]:
         conn = self._get_conn()

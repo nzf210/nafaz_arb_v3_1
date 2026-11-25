@@ -253,8 +253,11 @@ def format_latest_signals(signals: List[Dict[str, Any]]) -> str:
         asset = html.escape(str(s.get("base_asset", ""))).upper()
         route = html.escape(str(s.get("route_type", "")))
         st = html.escape(str(s.get("status", "")))
-        notional = float(s.get("target_notional_usdt", 0.0))
+        notional = float(s.get("effective_notional_usdt") or s.get("target_notional_usdt", 0.0))
         reason = html.escape(str(s.get("reason") or "-"))
+        ex = html.escape(str(s.get("exchange") or "")).strip()
+        if ex:
+            reason = f"{reason} ({ex})"
         lines.append(
             f"<b>{i}. {asset}</b> ({route}) — <code>{st}</code>\n"
             f"• Target: <code>${notional:.2f}</code> | Alasan: <i>{reason}</i>\n"

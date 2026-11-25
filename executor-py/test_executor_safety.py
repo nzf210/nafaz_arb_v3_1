@@ -177,3 +177,53 @@ def test_watchdog_keeps_position_when_unwind_unverified():
     remaining = json.loads(redis.get("core:positions"))
     assert len(remaining) == 1
     assert remaining[0]["base_asset"] == "BTC"
+
+
+def test_canary_min_lot_missing_credentials_and_okx_posside_fallback():
+    from telegram_formatters import format_latest_signals
+
+    ex_okx = MockExchange("okx")
+    ex_mexc = MockExchange("mexc")
+
+    # 1. Missing credentials on Leg B (bybit not configured) returns missing_credentials_leg_b
+    executor_no_bybit = DeltaNeutralExecutor({"okx": ex_okx})
+    res_no_cred = executor_no_bybit.execute_signal(make_valid_signal(target_notional_usdt=20.0), dry_run=False, effective_notional_usdt=10.0)
+    assert res_no_cred["status"] == "REJECTED"
+    assert res_no_cred["reason"] == "missing_credentials_leg_b"
+    assert res_no_cred["exchange"] == "bybit"
+
+    # 2. Canary $10 below 1 contract lot returns canary_below_min_lot without crashing
+    res_min_lot = executor_no_bybit.execute_signal(make_valid_signal(target_notional_usdt=1000.0), dry_run=True, effective_notional_usdt=10.0)
+    assert res_min_lot["status"] == "REJECTED"
+    assert res_min_lot["reason"] == "canary_below_min_lot"
+
+    # 3. OKX Long/Short mode sCode 51000 posSide retry succeeds on entry and close
+    class PosSideOKX(MockExchange):
+        def create_order(self, symbol, order_type, side, amount, price=None, params=None):
+            if not params or "posSide" not in params:
+                raise RuntimeError('okx {"code":"1","data":[{"sCode":"51000","sMsg":"Parameter posSide error"}]}')
+            return super().create_order(symbol, order_type, side, amount, price, params)
+
+    pos_okx = PosSideOKX("okx")
+    executor_pos = DeltaNeutralExecutor(
+        {"okx": pos_okx, "bybit": ex_mexc},
+        guardrails={"default": {"tick_size": 0.1, "step_size": 0.0001, "min_notional": 5.0}},
+    )
+    res_pos = executor_pos.execute_signal(make_valid_signal(target_notional_usdt=20.0), dry_run=False, effective_notional_usdt=10.0)
+    assert res_pos["status"] == "FILLED_1TO1"
+    close_ord = executor_pos._create_close_order("okx", pos_okx, "BTC/USDT:USDT", "sell", 0.0001)
+    assert close_ord["side"] == "sell"
+
+    # 4. Telegram /latest formatter shows effective canary notional and exchange name
+    txt = format_latest_signals([{
+        "base_asset": "SAMSUNG",
+        "route_type": "perp_perp_cross_cex",
+        "status": "REJECTED",
+        "target_notional_usdt": 1000.0,
+        "effective_notional_usdt": 10.0,
+        "reason": "insufficient_balance_leg_b",
+        "exchange": "bybit",
+    }])
+    assert "$10.00" in txt
+    assert "insufficient_balance_leg_b (bybit)" in txt
+

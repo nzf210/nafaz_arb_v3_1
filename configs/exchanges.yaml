@@ -26,7 +26,7 @@ exchanges:
       max_concurrent_polls: 8
 
   bybit:
-    enabled: true
+    enabled: false
     base_url: "https://api.bybit.com"
     ws_url: "wss://stream.bybit.com/v5/public"
     spot_taker_fee: 0.0010

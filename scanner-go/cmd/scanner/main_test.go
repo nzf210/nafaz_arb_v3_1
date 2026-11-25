@@ -63,6 +63,7 @@ func TestScannerEndToEndDryRunPipeline(t *testing.T) {
 	exchangesCfg.Exchanges["okx"] = okxCfg
 
 	bybitCfg := exchangesCfg.Exchanges["bybit"]
+	bybitCfg.Enabled = true
 	bybitCfg.BaseURL = bybitSrv.URL
 	bybitCfg.SymbolAllowlist = nil
 	exchangesCfg.Exchanges["bybit"] = bybitCfg
@@ -185,6 +186,7 @@ func TestDynamicDiscoveryMatchingDelistingAndFaultIsolation(t *testing.T) {
 
 	for name, url := range map[string]string{"okx": okxSrv.URL, "bybit": bybitSrv.URL, "mexc": mexcSrv.URL} {
 		c := exchangesCfg.Exchanges[name]
+		c.Enabled = true
 		c.BaseURL = url
 		c.MaxRetries = 0
 		c.MarketDiscovery.Blocklist = []string{"BLOCKED"}

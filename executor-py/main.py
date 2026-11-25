@@ -66,6 +66,9 @@ def build_ccxt_exchanges(load_markets: bool = True) -> Dict[str, Any]:
     sandbox = _env_bool("CEX_SANDBOX", False)
     for name, cfg in specs.items():
         cls = cfg.pop("cls")
+        if not cfg.get("apiKey") or not cfg.get("secret"):
+            logger.info("Skipping CEX client %s (missing API credentials)", name)
+            continue
         params = {k: v for k, v in cfg.items() if v}
         params["enableRateLimit"] = True
         client = cls(params)

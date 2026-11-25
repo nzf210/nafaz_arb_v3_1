@@ -309,6 +309,10 @@ class TelegramBot:
             if hasattr(client, "fetch_balance"):
                 try:
                     res[name] = client.fetch_balance()
+                    if name == "mexc":
+                        swap_bal = client.fetch_balance({"type": "swap"})
+                        if isinstance(swap_bal, dict) and swap_bal.get("total", {}).get("USDT"):
+                            res[f"{name} (swap)"] = swap_bal
                 except Exception as exc:
                     logger.warning("Failed fetch balance %s: %s", name, exc)
         return res

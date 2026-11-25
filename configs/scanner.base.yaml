@@ -19,14 +19,14 @@ route_policies:
 
 profiles:
   - id: "funding_carry_core"
-    target_notional_usdt: 1000.0
+    target_notional_usdt: 20.0
     target_hold_days: 7.0
     max_breakeven_days: 2.5
     min_net_daily_yield: 0.0010
     min_volume_24h_usdt: 5000000.0
     max_initial_basis_spread: 0.005
   - id: "basis_convergence_fast"
-    target_notional_usdt: 1000.0
+    target_notional_usdt: 20.0
     target_hold_days: 1.0
     max_breakeven_days: 0.8
     min_net_daily_yield: 0.0015
