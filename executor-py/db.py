@@ -59,7 +59,8 @@ class PostgresStore:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT profile_id, enabled, dry_run, canary_max_notional_usdt, max_notional_usdt, "
-                "target_hold_days, basis_target_spread, basis_adverse_stop_spread FROM runtime_settings"
+                "target_hold_days, basis_target_spread, basis_adverse_stop_spread, "
+                "min_profit_usdt, max_loss_usdt, allow_loss_on_hold FROM runtime_settings"
             )
             rows = cur.fetchall()
         profiles: Dict[str, Dict[str, Any]] = {}
@@ -67,6 +68,7 @@ class PostgresStore:
             (
                 pid, enabled, dry_run, canary_cap, max_notional, target_hold_days,
                 basis_target_spread, basis_adverse_stop_spread,
+                min_profit_usdt, max_loss_usdt, allow_loss_on_hold,
             ) = row
             profiles[str(pid)] = {
                 "enabled": bool(enabled),
@@ -77,6 +79,11 @@ class PostgresStore:
                 "basis_target_spread": float(basis_target_spread) if basis_target_spread is not None else None,
                 "basis_adverse_stop_spread": (
                     float(basis_adverse_stop_spread) if basis_adverse_stop_spread is not None else None
+                ),
+                "min_profit_usdt": float(min_profit_usdt) if min_profit_usdt is not None else None,
+                "max_loss_usdt": float(max_loss_usdt) if max_loss_usdt is not None else None,
+                "allow_loss_on_hold": (
+                    bool(allow_loss_on_hold) if allow_loss_on_hold is not None else None
                 ),
             }
         return profiles

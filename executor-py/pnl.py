@@ -144,3 +144,21 @@ def compute_realized_pnl(position: Dict[str, Any], unwind: Dict[str, Any]) -> Di
         "pnl_status": pnl_status,
         "legs": legs,
     }
+
+def estimate_price_pnl(position: Dict[str, Any], prices: Dict[str, float]) -> Optional[float]:
+    """Gross price PnL if both legs were closed now at the supplied mark prices."""
+    if not prices:
+        return None
+    total = 0.0
+    priced = 0
+    for leg_key in ("leg_a", "leg_b"):
+        leg = position.get(leg_key) or {}
+        direction = resolve_direction(leg)
+        entry = leg_entry_price(leg)
+        mark = _positive(prices.get(leg_key))
+        qty = _positive(leg.get("qty")) or _positive(position.get("qty")) or 0.0
+        if direction is None or entry is None or mark is None or qty <= QTY_EPSILON:
+            continue
+        total += (mark - entry) * qty * direction
+        priced += 1
+    return total if priced == 2 else None

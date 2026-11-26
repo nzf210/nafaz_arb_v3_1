@@ -44,9 +44,10 @@ def fetch_leg_funding_24h(leg: Dict[str, Any], exchanges: Dict[str, Any]) -> Opt
         return None
 
 
-def fetch_current_basis(
+def fetch_leg_marks(
     position: Dict[str, Any], exchanges: Dict[str, Any]
-) -> tuple[Optional[float], Optional[str]]:
+) -> tuple[Optional[Dict[str, float]], Optional[str]]:
+    """Current mark price per leg, used for exit profitability gating."""
     prices: Dict[str, float] = {}
     for leg_key in ("leg_a", "leg_b"):
         leg = position.get(leg_key, {})
@@ -67,6 +68,15 @@ def fetch_current_basis(
             prices[leg_key] = float(price)
         except (TypeError, ValueError, OverflowError):
             return None, f"ticker price missing for {exchange} {symbol}"
+    return prices, None
+
+
+def fetch_current_basis(
+    position: Dict[str, Any], exchanges: Dict[str, Any]
+) -> tuple[Optional[float], Optional[str]]:
+    prices, issue = fetch_leg_marks(position, exchanges)
+    if issue or prices is None:
+        return None, issue
     basis = calculate_basis_spread(position, prices)
     return (basis, None) if basis is not None else (None, "basis inputs are invalid")
 

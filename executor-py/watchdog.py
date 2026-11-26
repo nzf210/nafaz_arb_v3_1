@@ -5,9 +5,11 @@ import logging
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-from exit_monitor import evaluate_position_exit
+from exit_monitor import evaluate_position_exit, fetch_leg_marks
+from exit_policy import DEFAULT_EXIT_POLICY, decide_exit
 from exit_rules import DEFAULT_PROFILE_EXIT_SETTINGS
 from notifier import TelegramNotifier
+from pnl import estimate_price_pnl
 from reconcile import REDIS_POSITIONS_KEY, ReconcileMixin
 
 logger = logging.getLogger(__name__)
@@ -54,6 +56,7 @@ class RiskWatchdog(ReconcileMixin):
         self.db_store = db_store
         self.dry_run = dry_run
         self._exit_data_alerted_at: Dict[str, int] = {}
+        self._exit_blocked_at: Dict[str, int] = {}
         self._position_alerts: Dict[str, tuple[str, int]] = {}
         self._unwind_attempts: Dict[str, tuple[int, int]] = {}
         self._margin_status: Dict[str, str] = {}
@@ -69,7 +72,12 @@ class RiskWatchdog(ReconcileMixin):
             return settings
         for profile_id, profile in runtime_settings.items():
             resolved = settings.setdefault(profile_id, {"target_hold_days": 3.0})
-            for key in ("target_hold_days", "basis_target_spread", "basis_adverse_stop_spread"):
+            for key in (
+                "target_hold_days",
+                "basis_target_spread",
+                "basis_adverse_stop_spread",
+                *DEFAULT_EXIT_POLICY,
+            ):
                 if profile.get(key) is not None:
                     resolved[key] = float(profile[key])
         return settings
@@ -288,6 +296,22 @@ class RiskWatchdog(ReconcileMixin):
     ) -> tuple[Optional[str], List[str]]:
         return evaluate_position_exit(pos, now_ms, settings, self.exchanges)
 
+    def _estimate_exit_pnl(self, pos: Dict[str, Any]) -> Optional[float]:
+        marks, issue = fetch_leg_marks(pos, self.exchanges)
+        if issue or marks is None:
+            return None
+        return estimate_price_pnl(pos, marks)
+
+    def _report_exit_blocked(self, pos: Dict[str, Any], reason: str, note: str, now_ms: int) -> None:
+        base_asset = str(pos.get("base_asset", "UNKNOWN"))
+        last_ms = self._exit_blocked_at.get(base_asset, 0)
+        if now_ms - last_ms < EXIT_DATA_ALERT_INTERVAL_MS:
+            return
+        self._exit_blocked_at[base_asset] = now_ms
+        details = {"base_asset": base_asset, "trigger": reason, "note": note}
+        self._record_risk("EXIT_BLOCKED", "INFO", details)
+        self.notifier.send(f"[EXIT HELD] {base_asset}: {reason} → {note}; position kept open")
+
     def _report_exit_data_issues(self, pos: Dict[str, Any], issues: List[str], now_ms: int) -> None:
         base_asset = str(pos.get("base_asset", "UNKNOWN"))
         if not issues:
@@ -324,8 +348,14 @@ class RiskWatchdog(ReconcileMixin):
             self._report_exit_data_issues(pos, issues, curr_ms)
             if not reason:
                 continue
+            pnl_estimate = self._estimate_exit_pnl(pos)
+            allowed, note = decide_exit(reason, pnl_estimate, settings)
+            if not allowed:
+                self._report_exit_blocked(pos, reason, note, curr_ms)
+                continue
+            self._exit_blocked_at.pop(str(pos.get("base_asset", "UNKNOWN")), None)
             base_asset = pos.get("base_asset", "UNKNOWN")
-            self.notifier.send(f"[EXIT] Closing {base_asset}: {reason}")
+            self.notifier.send(f"[EXIT] Closing {base_asset}: {reason} ({note})")
             self._record_risk("AUTO_EXIT", "INFO", {"base_asset": base_asset, "reason": reason})
             unwind_res = self._execute_unwind_and_finalize(pos, f"AUTO_EXIT:{reason}")
             exited.append({"base_asset": base_asset, "reason": reason, "unwind": unwind_res})

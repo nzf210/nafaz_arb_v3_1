@@ -365,7 +365,7 @@ def test_postgres_store_integration_with_consumer_and_watchdog():
         def fetchall(self):
             last_q = self.conn.queries[-1][0] if self.conn.queries else ""
             if "FROM runtime_settings" in last_q:
-                return [("funding_carry_core", True, True, 250.0, 500.0, 7.0, None, None)]
+                return [("funding_carry_core", True, True, 250.0, 500.0, 7.0, None, None, 0.0, 0.05, False)]
             if "FROM active_positions" in last_q:
                 return list(self.conn.active_positions)
             return []
