@@ -130,18 +130,41 @@ def compute_realized_pnl(position: Dict[str, Any], unwind: Dict[str, Any]) -> Di
     Returns a summary dict; `realized_pnl_usdt` is None only when no leg produced a
     computable value, so closed trades never silently report an empty PnL.
     """
+    funding_usdt, funding_data_available = resolve_funding_usdt(unwind)
+    legs, gross, priced_legs, fees, fee_data_available = resolve_leg_pnl(position, unwind)
+    realized = gross if priced_legs else None
+    net = compute_net_pnl(realized, fees, funding_usdt, fee_data_available, funding_data_available)
+    pnl_status = determine_pnl_status(priced_legs, fee_data_available, funding_data_available)
+    return {
+        "realized_pnl_usdt": realized,
+        "fees_usdt": fees if fee_data_available else None,
+        "funding_usdt": funding_usdt if funding_data_available else None,
+        "net_pnl_usdt": net,
+        "pnl_status": pnl_status,
+        "fee_status": "complete" if fee_data_available else "unavailable",
+        "legs": legs,
+    }
+
+
+def resolve_funding_usdt(unwind: Dict[str, Any]) -> tuple[Optional[float], bool]:
+    if "funding_usdt" not in unwind:
+        return None, False
+    try:
+        funding_usdt = float(unwind.get("funding_usdt"))
+    except (TypeError, ValueError, OverflowError):
+        return None, False
+    if not math.isfinite(funding_usdt):
+        return None, False
+    return funding_usdt, True
+
+
+def resolve_leg_pnl(
+    position: Dict[str, Any], unwind: Dict[str, Any]
+) -> tuple[Dict[str, Any], float, int, float, bool]:
     gross = 0.0
     fees = 0.0
-    fee_data_available = True
-    funding_data_available = "funding_usdt" in unwind
-    funding_usdt = 0.0
-    if funding_data_available:
-        try:
-            funding_usdt = float(unwind.get("funding_usdt"))
-            funding_data_available = math.isfinite(funding_usdt)
-        except (TypeError, ValueError, OverflowError):
-            funding_data_available = False
     priced_legs = 0
+    fee_data_available = True
     legs: Dict[str, Any] = {}
     for leg_key, order_key, suffix in (("leg_a", "order_a", "a"), ("leg_b", "order_b", "b")):
         leg = position.get(leg_key) or {}
@@ -150,7 +173,7 @@ def compute_realized_pnl(position: Dict[str, Any], unwind: Dict[str, Any]) -> Di
         leg_pnl, entry, exit_price, fee = _leg_pnl(leg, order, qty)
         if fee is None:
             fee_data_available = False
-        else:
+        if fee is not None:
             fees += fee
         if leg_pnl is not None:
             gross += leg_pnl
@@ -162,26 +185,35 @@ def compute_realized_pnl(position: Dict[str, Any], unwind: Dict[str, Any]) -> Di
             "realized_pnl_usdt": leg_pnl,
             "fee_usdt": fee,
         }
-    realized = gross if priced_legs else None
-    net = (
-        realized - fees - funding_usdt
-        if realized is not None and fee_data_available and funding_data_available
-        else None
-    )
-    pnl_status = "complete" if priced_legs == 2 else ("partial" if priced_legs == 1 else "unavailable")
-    if pnl_status != "unavailable" and not fee_data_available:
-        pnl_status = "fee_unavailable"
-    if pnl_status == "complete" and not funding_data_available:
-        pnl_status = "funding_unavailable"
-    return {
-        "realized_pnl_usdt": realized,
-        "fees_usdt": fees if fee_data_available else None,
-        "funding_usdt": funding_usdt if funding_data_available else None,
-        "net_pnl_usdt": net,
-        "pnl_status": pnl_status,
-        "fee_status": "complete" if fee_data_available else "unavailable",
-        "legs": legs,
-    }
+    return legs, gross, priced_legs, fees, fee_data_available
+
+
+def compute_net_pnl(
+    realized: Optional[float],
+    fees: float,
+    funding_usdt: Optional[float],
+    fee_available: bool,
+    funding_available: bool,
+) -> Optional[float]:
+    if realized is None or not fee_available or not funding_available:
+        return None
+    return realized - fees - float(funding_usdt or 0.0)
+
+
+def determine_pnl_status(
+    priced_legs: int, fee_available: bool, funding_available: bool
+) -> str:
+    if priced_legs == 2:
+        status = "complete"
+    elif priced_legs == 1:
+        status = "partial"
+    else:
+        status = "unavailable"
+    if status != "unavailable" and not fee_available:
+        return "fee_unavailable"
+    if status == "complete" and not funding_available:
+        return "funding_unavailable"
+    return status
 
 def estimate_price_pnl(position: Dict[str, Any], prices: Dict[str, float]) -> Optional[float]:
     """Gross price PnL if both legs were closed now at the supplied mark prices."""
