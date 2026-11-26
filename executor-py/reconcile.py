@@ -56,7 +56,7 @@ class ReconcileMixin:
             status = "REPAIRED"
         else:
             status = "OK"
-        self.maybe_clear_auto_kill_switch()
+        self.maybe_clear_auto_kill_switch(healthy=status in ("OK", "REPAIRED"))
         return {"status": status, "drifts": drifts, "unavailable": unavailable, "repaired": repaired}
 
     def _reconcile_position(

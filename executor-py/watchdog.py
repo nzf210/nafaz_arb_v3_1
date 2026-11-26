@@ -107,18 +107,16 @@ class RiskWatchdog(ReconcileMixin):
         reason = str(raw or "").strip()
         return reason or LEGACY_KILL_REASON
 
-    def maybe_clear_auto_kill_switch(self) -> bool:
-        """Resume trading after automatic halts once no exposure remains."""
-        if not self._kill_switch_active():
+    def maybe_clear_auto_kill_switch(self, healthy: bool = True) -> bool:
+        """Resume entries after automatic halts once every remaining position reconciles cleanly."""
+        if not self._kill_switch_active() or not healthy:
             return False
         reason = self._kill_switch_reason()
         if not reason.startswith(AUTO_REASON_PREFIX) and reason != LEGACY_KILL_REASON:
             return False
-        if self._load_positions():
-            return False
         self.redis.set(KILL_SWITCH_KEY, "false")
         self.redis.set(KILL_SWITCH_REASON_KEY, "")
-        self.notifier.send(f"[RECOVERY] Kill-switch auto-cleared ({reason}); all legs flat, entries resumed")
+        self.notifier.send(f"[RECOVERY] Kill-switch auto-cleared ({reason}); positions reconciled, entries resumed")
         self._record_risk("KILL_SWITCH_AUTO_CLEARED", "INFO", {"reason": reason})
         return True
 

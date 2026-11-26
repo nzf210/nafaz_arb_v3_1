@@ -199,3 +199,24 @@ def test_dry_run_watchdog_skips_exchange_truth_repair():
     assert rec["status"] == "OK"
     assert store.closed == []
     assert len(json.loads(redis.get("core:positions"))) == 1
+
+
+def test_auto_kill_switch_clears_for_healthy_open_position():
+    redis = MockRedis()
+    ex_okx = MockExchange("okx")
+    ex_bybit = MockExchange("bybit")
+    ex_okx.positions = [{"symbol": "BTC/USDT:USDT", "contracts": 0.05}]
+    ex_bybit.positions = [{"symbol": "BTC/USDT:USDT", "contracts": 0.05}]
+    watchdog = RiskWatchdog(
+        redis,
+        exchanges={"okx": ex_okx, "bybit": ex_bybit},
+        notifier=TelegramNotifier(dry_run=True),
+    )
+    redis.set("core:positions", json.dumps([_position()]))
+    watchdog.activate_kill_switch("AUTO_EXIT:funding_flipped unwind not verified", auto=True)
+
+    rec = watchdog.reconcile_positions()
+
+    assert rec["status"] == "OK"
+    assert redis.get("core:kill_switch") == "false"
+    assert len(json.loads(redis.get("core:positions"))) == 1, "healthy hedged position stays managed"
