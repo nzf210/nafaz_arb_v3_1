@@ -269,6 +269,7 @@ class TelegramBot:
     def deactivate_kill_switch(self) -> None:
         if self.redis:
             self.redis.set(CORE_KILL_SWITCH, "false")
+            self.redis.set("core:kill_switch_reason", "")
 
     def get_system_status(self) -> Dict[str, Any]:
         pos = self.get_active_positions()
@@ -321,6 +322,16 @@ class TelegramBot:
         if self.db_store and hasattr(self.db_store, "list_recent_executions"):
             return self.db_store.list_recent_executions(limit)
         return []
+
+    def get_closed_trades(self, limit: int = 10) -> List[Dict[str, Any]]:
+        if self.db_store and hasattr(self.db_store, "list_closed_trades"):
+            return self.db_store.list_closed_trades(limit)
+        return []
+
+    def get_pnl_summary(self) -> Dict[str, Any]:
+        if self.db_store and hasattr(self.db_store, "realized_pnl_summary"):
+            return self.db_store.realized_pnl_summary()
+        return {}
 
     def get_recent_signals(self, limit: int = 10) -> List[Dict[str, Any]]:
         if self.db_store and hasattr(self.db_store, "list_recent_signals"):

@@ -6,6 +6,9 @@ import logging
 import time
 from typing import Any, Callable, Dict, Optional
 
+from execution_unwind import UnwindMixin
+from pnl import resolve_fill_price
+
 logger = logging.getLogger(__name__)
 
 PERP_SUFFIX = ":USDT"
@@ -101,7 +104,7 @@ def opposite_side(side: str) -> str:
     return "sell" if side.lower() == "buy" else "buy"
 
 
-class DeltaNeutralExecutor:
+class DeltaNeutralExecutor(UnwindMixin):
     """Executes 1:1 delta-neutral dual-leg routes with partial-fill & unwind protection."""
 
     def __init__(
@@ -302,8 +305,8 @@ class DeltaNeutralExecutor:
             return self._handle_unhedged_leg_a(signal, client_a, sym_a, side_a, leg_a["exchange"], qty, filled_a, filled_b, unhedged_a, cancelled_unfilled_a, last_error)
 
         status = "FILLED_1TO1" if filled_a == qty else "PARTIAL_FILLED_1TO1"
-        average_a = order_a.get("average")
-        average_b = order_b.get("average") if order_b else None
+        average_a = resolve_fill_price(self.exchanges.get(leg_a["exchange"]), sym_a, order_a)
+        average_b = resolve_fill_price(self.exchanges.get(leg_b["exchange"]), sym_b, order_b) if order_b else None
         if self.notifier:
             self.notifier(f"[EXEC] {status} {signal['base_asset']} qty={filled_a}")
         return {
@@ -403,94 +406,3 @@ class DeltaNeutralExecutor:
         close_side = opposite_side(original_side)
         logger.error("Emergency market unwind: %s %s qty=%s", close_side, symbol, qty)
         return self._create_close_order(exchange, client, symbol, close_side, qty)
-
-    def _create_close_order(
-        self, exchange: str, client: Any, symbol: str, close_side: str, base_qty: float, ref_price: Optional[float] = None
-    ) -> Dict[str, Any]:
-        ord_amt, _ = self._to_order_amount(exchange, symbol, base_qty)
-        if PERP_SUFFIX in symbol:
-            try:
-                return client.create_order(symbol, "market", close_side, ord_amt, None, {"reduceOnly": True})
-            except TypeError as exc:
-                raise RuntimeError(
-                    f"{exchange} client rejected reduceOnly; refusing an unsafe non-reduce-only close"
-                ) from exc
-            except Exception as exc:
-                if "posside" in str(exc).lower() or "51000" in str(exc):
-                    pos_side = "long" if close_side.lower() == "sell" else "short"
-                    return client.create_order(symbol, "market", close_side, ord_amt, None, {"reduceOnly": True, "posSide": pos_side})
-                raise
-        if close_side == "buy" and ref_price is not None and ref_price > 0:
-            return client.create_order(symbol, "market", close_side, ord_amt, ref_price)
-        return client.create_order(symbol, "market", close_side, ord_amt, None)
-
-    @staticmethod
-    def _position_base_qty(client: Any, symbol: str, position: Dict[str, Any]) -> float:
-        info = position.get("info") or {}
-        if (position.get("symbol") or info.get("symbol")) != symbol:
-            return 0.0
-        contracts = position.get("contracts")
-        if contracts is None:
-            contracts = position.get("amount", 0.0)
-        contract_size = position.get("contractSize")
-        if contract_size is None and getattr(client, "markets", None):
-            contract_size = (client.markets.get(symbol) or {}).get("contractSize")
-        return abs(float(contracts or 0.0) * float(contract_size or 1.0))
-
-    def _perpetual_position_is_flat(self, client: Any, symbol: str) -> bool:
-        if not hasattr(client, "fetch_positions"):
-            return False
-        positions = client.fetch_positions([symbol])
-        if not isinstance(positions, list):
-            return False
-        return all(self._position_base_qty(client, symbol, pos) <= 1e-10 for pos in positions)
-
-    def _close_leg_and_verify(
-        self, exchange: str, client: Any, symbol: str, close_side: str, base_qty: float, ref_price: Optional[float]
-    ) -> tuple[Optional[Dict[str, Any]], bool, str]:
-        order = self._create_close_order(exchange, client, symbol, close_side, base_qty, ref_price)
-        order_amount, contract_size = self._to_order_amount(exchange, symbol, base_qty)
-        filled_base, order_status = self._resolve_filled_base(client, symbol, order, order_amount, contract_size)
-        if filled_base + 1e-10 < base_qty:
-            return order, False, f"close_fill_incomplete:{filled_base}/{base_qty}"
-        if PERP_SUFFIX in symbol and not self._perpetual_position_is_flat(client, symbol):
-            return order, False, "exchange_position_not_flat"
-        return order, True, order_status
-
-    def _safe_close_leg(self, leg: Dict[str, Any], sym: str, close_side: str, qty: float) -> tuple[Optional[Dict[str, Any]], bool, str]:
-        client = self.exchanges[leg["exchange"]]
-        ref_price = float(leg.get("price") or leg.get("vwap_price") or 0.0) or None
-        try:
-            return self._close_leg_and_verify(leg["exchange"], client, sym, close_side, qty, ref_price)
-        except Exception as exc:
-            return None, False, f"close_error:{exc}"
-
-    def unwind_route(self, position: Dict[str, Any], dry_run: bool = False) -> Dict[str, Any]:
-        """Close both legs and report success only after close fills are verified."""
-        leg_a, leg_b = position["leg_a"], position["leg_b"]
-        qty = float(position["qty"])
-        close_side_a = opposite_side(action_to_side(leg_a.get("side") or leg_a.get("action")))
-        close_side_b = opposite_side(action_to_side(leg_b.get("side") or leg_b.get("action")))
-        sym_a = leg_a.get("symbol") or leg_a.get("canon_symbol") or leg_a["raw_symbol"]
-        sym_b = leg_b.get("symbol") or leg_b.get("canon_symbol") or leg_b["raw_symbol"]
-
-        if dry_run:
-            res = {"status": "DRY_RUN_UNWOUND", "base_asset": position.get("base_asset"), "qty": qty, "leg_a_close_side": close_side_a, "leg_b_close_side": close_side_b}
-            self.dry_run_log.append(res)
-            return res
-
-        order_a, verified_a, detail_a = self._safe_close_leg(leg_a, sym_a, close_side_a, qty)
-        order_b, verified_b, detail_b = self._safe_close_leg(leg_b, sym_b, close_side_b, qty)
-        verified = verified_a and verified_b
-        status = "UNWOUND_VERIFIED" if verified else "UNWIND_PENDING"
-        if self.notifier:
-            level = "UNWIND VERIFIED" if verified else "UNWIND RECONCILIATION REQUIRED"
-            self.notifier(f"[{level}] {position.get('base_asset', '')} qty={qty}")
-        return {
-            "status": status, "base_asset": position.get("base_asset"), "qty": qty,
-            "order_a": order_a, "order_b": order_b, "verified_flat": verified,
-            "leg_a_verified": verified_a, "leg_b_verified": verified_b,
-            "leg_a_detail": detail_a, "leg_b_detail": detail_b,
-        }
-
-    close_route = unwind_route

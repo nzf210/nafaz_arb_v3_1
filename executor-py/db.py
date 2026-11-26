@@ -334,6 +334,122 @@ class PostgresStore:
                 for r in rows
             ]
 
+    def record_closed_trade(
+        self,
+        position: Dict[str, Any],
+        unwind_result: Dict[str, Any],
+        pnl: Dict[str, Any],
+        close_reason: Optional[str] = None,
+    ) -> None:
+        """Persist a finished position with its realized PnL for trade history."""
+        conn = self._get_conn()
+        if conn is None:
+            return
+        legs = pnl.get("legs") or {}
+        leg_a = legs.get("leg_a") or {}
+        leg_b = legs.get("leg_b") or {}
+        src_a = position.get("leg_a") or {}
+        src_b = position.get("leg_b") or {}
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO closed_trades (
+                    base_asset, profile_id, qty, leg_a_exchange, leg_b_exchange,
+                    entry_price_a, entry_price_b, exit_price_a, exit_price_b,
+                    closed_qty_a, closed_qty_b, realized_pnl_usdt, fees_usdt, net_pnl_usdt,
+                    pnl_status, close_reason, opened_at_ms
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    str(position.get("base_asset", "unknown")),
+                    str(position.get("profile_id", "")) or None,
+                    float(position.get("qty", 0.0) or 0.0),
+                    src_a.get("exchange"),
+                    src_b.get("exchange"),
+                    leg_a.get("entry_price"),
+                    leg_b.get("entry_price"),
+                    leg_a.get("exit_price"),
+                    leg_b.get("exit_price"),
+                    float(leg_a.get("qty", 0.0) or 0.0),
+                    float(leg_b.get("qty", 0.0) or 0.0),
+                    pnl.get("realized_pnl_usdt"),
+                    float(pnl.get("fees_usdt") or 0.0),
+                    pnl.get("net_pnl_usdt"),
+                    str(pnl.get("pnl_status") or "unavailable"),
+                    close_reason,
+                    int(position.get("opened_at_ms") or 0) or None,
+                ),
+            )
+
+    def list_closed_trades(self, limit: int = 10) -> List[Dict[str, Any]]:
+        conn = self._get_conn()
+        if conn is None:
+            return []
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, base_asset, profile_id, qty, leg_a_exchange, leg_b_exchange,
+                       entry_price_a, entry_price_b, exit_price_a, exit_price_b,
+                       realized_pnl_usdt, fees_usdt, net_pnl_usdt, pnl_status,
+                       close_reason, closed_at
+                FROM closed_trades
+                ORDER BY id DESC LIMIT %s
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+        return [
+            {
+                "id": r[0],
+                "base_asset": r[1],
+                "profile_id": r[2],
+                "qty": float(r[3] or 0.0),
+                "leg_a_exchange": r[4],
+                "leg_b_exchange": r[5],
+                "entry_price_a": r[6],
+                "entry_price_b": r[7],
+                "exit_price_a": r[8],
+                "exit_price_b": r[9],
+                "realized_pnl_usdt": float(r[10]) if r[10] is not None else None,
+                "fees_usdt": float(r[11] or 0.0),
+                "net_pnl_usdt": float(r[12]) if r[12] is not None else None,
+                "pnl_status": r[13],
+                "close_reason": r[14],
+                "closed_at": str(r[15]),
+            }
+            for r in rows
+        ]
+
+    def realized_pnl_summary(self) -> Dict[str, Any]:
+        conn = self._get_conn()
+        if conn is None:
+            return {}
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*), COUNT(realized_pnl_usdt),
+                       COALESCE(SUM(realized_pnl_usdt), 0), COALESCE(SUM(fees_usdt), 0),
+                       COALESCE(SUM(CASE WHEN realized_pnl_usdt > 0 THEN 1 ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN realized_pnl_usdt < 0 THEN 1 ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN closed_at >= NOW() - INTERVAL '24 hours'
+                                         THEN realized_pnl_usdt ELSE 0 END), 0)
+                FROM closed_trades
+                """
+            )
+            row = cur.fetchone() or (0, 0, 0.0, 0.0, 0, 0, 0.0)
+        count, priced, gross, fees, wins, losses, pnl_24h = row
+        return {
+            "trades": int(count),
+            "priced_trades": int(priced),
+            "unpriced_trades": int(count) - int(priced),
+            "realized_pnl_usdt": float(gross),
+            "fees_usdt": float(fees),
+            "net_pnl_usdt": float(gross) - float(fees),
+            "wins": int(wins),
+            "losses": int(losses),
+            "pnl_24h_usdt": float(pnl_24h),
+        }
+
     def update_profile_setting(self, profile_id: str, field: str, value: Any) -> bool:
         allowed = {
             "enabled": bool,

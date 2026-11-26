@@ -97,3 +97,28 @@ CREATE TABLE IF NOT EXISTS risk_events (
     details JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS closed_trades (
+    id BIGSERIAL PRIMARY KEY,
+    base_asset TEXT NOT NULL,
+    profile_id TEXT,
+    qty DOUBLE PRECISION NOT NULL DEFAULT 0,
+    leg_a_exchange TEXT,
+    leg_b_exchange TEXT,
+    entry_price_a DOUBLE PRECISION,
+    entry_price_b DOUBLE PRECISION,
+    exit_price_a DOUBLE PRECISION,
+    exit_price_b DOUBLE PRECISION,
+    closed_qty_a DOUBLE PRECISION NOT NULL DEFAULT 0,
+    closed_qty_b DOUBLE PRECISION NOT NULL DEFAULT 0,
+    realized_pnl_usdt DOUBLE PRECISION,
+    fees_usdt DOUBLE PRECISION NOT NULL DEFAULT 0,
+    net_pnl_usdt DOUBLE PRECISION,
+    pnl_status TEXT NOT NULL DEFAULT 'unavailable',
+    close_reason TEXT,
+    opened_at_ms BIGINT,
+    closed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_closed_trades_closed_at ON closed_trades (closed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_closed_trades_asset ON closed_trades (base_asset);

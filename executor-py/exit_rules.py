@@ -74,26 +74,3 @@ def basis_exit_reason(
             f"move={adverse_stop_spread:.6f})"
         )
     return None
-
-
-def calculate_realized_price_pnl(
-    position: Dict[str, Any], unwind_result: Dict[str, Any]
-) -> Optional[float]:
-    """Calculate gross price PnL from verified close averages, excluding fees and funding."""
-    if unwind_result.get("verified_flat") is not True:
-        return None
-    try:
-        qty = float(position["qty"])
-        pnl = 0.0
-        for leg_key, order_key in (("leg_a", "order_a"), ("leg_b", "order_b")):
-            leg = position[leg_key]
-            order = unwind_result.get(order_key) or {}
-            entry_price = _price({}, leg.get("entry_avg_price"))
-            exit_price = _price({}, order.get("average"))
-            if entry_price is None or exit_price is None:
-                return None
-            direction = 1.0 if action_to_side(str(leg.get("side") or leg.get("action") or "")) == "buy" else -1.0
-            pnl += (exit_price - entry_price) * qty * direction
-    except (KeyError, TypeError, ValueError):
-        return None
-    return pnl if math.isfinite(pnl) else None

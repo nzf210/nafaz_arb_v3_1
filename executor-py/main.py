@@ -166,6 +166,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         notifier=tg_bot,
         unwind_callback=lambda pos: executor.unwind_route(pos, dry_run=dry_run),
         db_store=db_store,
+        dry_run=dry_run,
     )
     tg_bot.executor = executor
     tg_bot.consumer = consumer
@@ -183,17 +184,26 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     last_watchdog_ts = 0.0
     while True:
-        msg = pubsub.get_message(timeout=1.0)
-        if msg and msg.get("data"):
-            res = consumer.process_signal(msg["data"])
-            logger.info("Signal processed: %s", res)
+        try:
+            msg = pubsub.get_message(timeout=1.0)
+            if msg and msg.get("data"):
+                res = consumer.process_signal(msg["data"])
+                logger.info("Signal processed: %s", res)
+        except Exception:
+            logger.exception("Signal processing failed; executor keeps running")
 
         now = time.time()
         if now - last_watchdog_ts >= watchdog_interval_sec:
-            watchdog.reconcile_positions()
-            watchdog.check_margin_ratios()
-            watchdog.check_adl_indicators()
-            watchdog.check_exit_conditions()
+            for step_name, step in (
+                ("reconcile", watchdog.reconcile_positions),
+                ("margin", watchdog.check_margin_ratios),
+                ("adl", watchdog.check_adl_indicators),
+                ("exits", watchdog.check_exit_conditions),
+            ):
+                try:
+                    step()
+                except Exception:
+                    logger.exception("Watchdog step failed: %s (loop continues)", step_name)
             last_watchdog_ts = now
 
 

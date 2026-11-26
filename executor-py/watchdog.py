@@ -1,19 +1,14 @@
-"""Risk watchdog: position/balance reconciliation, margin ratio & ADL monitoring, kill-switch, Telegram alerts."""
+"""Risk watchdog: margin ratio & ADL monitoring, kill-switch policy, unwind retries, exit scheduling."""
 
 import json
 import logging
-import math
-import os
 import time
-import urllib.request
 from typing import Any, Callable, Dict, List, Optional
 
 from exit_monitor import evaluate_position_exit
-from exit_rules import (
-    DEFAULT_PROFILE_EXIT_SETTINGS,
-    calculate_realized_price_pnl,
-)
-from position_reconciliation import fetch_leg_qty, leg_symbol
+from exit_rules import DEFAULT_PROFILE_EXIT_SETTINGS
+from notifier import TelegramNotifier
+from reconcile import REDIS_POSITIONS_KEY, ReconcileMixin
 
 logger = logging.getLogger(__name__)
 
@@ -21,44 +16,18 @@ MARGIN_WARNING_THRESHOLD = 0.60
 MARGIN_CRITICAL_THRESHOLD = 0.75
 ADL_HIGH_RISK_THRESHOLD = 4
 EXIT_DATA_ALERT_INTERVAL_MS = 300_000
-POSITION_ALERT_INTERVAL_MS = 300_000
-REDIS_POSITIONS_KEY = "core:positions"
+UNWIND_RETRY_INTERVAL_MS = 60_000
+MAX_UNWIND_ATTEMPTS = 3
 PERP_SUFFIX = ":USDT"
+KILL_SWITCH_KEY = "core:kill_switch"
+KILL_SWITCH_REASON_KEY = "core:kill_switch_reason"
+AUTO_REASON_PREFIX = "auto:"
+LEGACY_KILL_REASON = "legacy_unknown"
+
+__all__ = ["RiskWatchdog", "TelegramNotifier", "REDIS_POSITIONS_KEY"]
 
 
-class TelegramNotifier:
-    """Structured Telegram notifier with offline outbox fallback for dry-run / testing."""
-
-    def __init__(
-        self,
-        bot_token: Optional[str] = None,
-        chat_id: Optional[str] = None,
-        dry_run: bool = True,
-    ):
-        self.bot_token = bot_token if bot_token is not None else os.getenv("TELEGRAM_BOT_TOKEN", "")
-        self.chat_id = chat_id if chat_id is not None else os.getenv("TELEGRAM_CHAT_ID", "")
-        self.dry_run = dry_run
-        self.outbox: List[str] = []
-
-    def send(self, message: str) -> bool:
-        self.outbox.append(message)
-        logger.info("Telegram alert: %s", message)
-        if not self.bot_token or not self.chat_id:
-            return True
-        prefix = "[SIMULASI] " if self.dry_run and not message.startswith("[") else ""
-        text = f"{prefix}{message}"
-        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-        payload = json.dumps({"chat_id": self.chat_id, "text": text}).encode("utf-8")
-        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                return 200 <= resp.status < 300
-        except Exception as exc:
-            logger.warning("Telegram HTTP send failed: %s", exc)
-            return False
-
-
-class RiskWatchdog:
+class RiskWatchdog(ReconcileMixin):
     """Monitors position drift, margin usage, and ADL ranks across exchanges."""
 
     def __init__(
@@ -72,6 +41,7 @@ class RiskWatchdog:
         margin_critical_threshold: float = MARGIN_CRITICAL_THRESHOLD,
         adl_threshold: int = ADL_HIGH_RISK_THRESHOLD,
         db_store: Optional[Any] = None,
+        dry_run: bool = False,
     ):
         self.redis = redis_client
         self.exchanges = exchanges or {}
@@ -82,8 +52,11 @@ class RiskWatchdog:
         self.margin_critical_threshold = margin_critical_threshold
         self.adl_threshold = adl_threshold
         self.db_store = db_store
+        self.dry_run = dry_run
         self._exit_data_alerted_at: Dict[str, int] = {}
         self._position_alerts: Dict[str, tuple[str, int]] = {}
+        self._unwind_attempts: Dict[str, tuple[int, int]] = {}
+        self._margin_status: Dict[str, str] = {}
 
     def _load_exit_profile_settings(self) -> Dict[str, Dict[str, Any]]:
         settings = {key: dict(value) for key, value in DEFAULT_PROFILE_EXIT_SETTINGS.items()}
@@ -110,153 +83,44 @@ class RiskWatchdog:
             except Exception as exc:
                 logger.warning("Telegram notify_risk_alert failed: %s", exc)
 
-    def activate_kill_switch(self, reason: str) -> None:
-        self.redis.set("core:kill_switch", "true")
+    def _kill_switch_active(self) -> bool:
+        val = self.redis.get(KILL_SWITCH_KEY)
+        if isinstance(val, bytes):
+            val = val.decode("utf-8")
+        return str(val).strip().lower() in ("true", "1", "yes", "on")
+
+    def activate_kill_switch(self, reason: str, auto: bool = False) -> None:
+        """Halt new entries only; exits and monitoring keep running."""
+        stored_reason = f"{AUTO_REASON_PREFIX}{reason}" if auto else reason
+        already = self._kill_switch_active()
+        self.redis.set(KILL_SWITCH_KEY, "true")
+        self.redis.set(KILL_SWITCH_REASON_KEY, stored_reason)
+        if already:
+            return
         self.notifier.send(f"[CRITICAL] Kill-switch activated: {reason}")
         self._record_risk("KILL_SWITCH", "CRITICAL", {"reason": reason})
 
-    def _load_positions(self, provided: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
-        if provided is not None:
-            return provided
-        raw = self.redis.get(REDIS_POSITIONS_KEY)
+    def _kill_switch_reason(self) -> str:
+        raw = self.redis.get(KILL_SWITCH_REASON_KEY)
         if isinstance(raw, bytes):
             raw = raw.decode("utf-8")
-        if raw:
-            return json.loads(raw)
-        if self.db_store is not None and hasattr(self.db_store, "load_active_positions"):
-            return self.db_store.load_active_positions()
-        return []
+        reason = str(raw or "").strip()
+        return reason or LEGACY_KILL_REASON
 
-    def reconcile_positions(
-        self,
-        expected_positions: Optional[List[Dict[str, Any]]] = None,
-    ) -> Dict[str, Any]:
-        """
-        Compare expected positions (from Redis `core:positions` or argument) with
-        actual exchange positions and detect 1:1 quantity drift between legs.
-        """
-        positions = self._load_positions(expected_positions)
-        drifts: List[Dict[str, Any]] = []
-        unavailable: List[Dict[str, Any]] = []
-        for pos in positions:
-            drift, data_issue = self._reconcile_position(pos)
-            if drift:
-                drifts.append(drift)
-            if data_issue:
-                unavailable.append(data_issue)
-
-        if drifts:
-            status = "DRIFT_DETECTED"
-        elif unavailable:
-            status = "DATA_UNAVAILABLE"
-        else:
-            status = "OK"
-        return {"status": status, "drifts": drifts, "unavailable": unavailable}
-
-    def _reconcile_position(
-        self, pos: Dict[str, Any]
-    ) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
-        base_asset = pos.get("base_asset", "UNKNOWN")
-        try:
-            expected_qty = float(pos.get("qty", 0.0))
-        except (TypeError, ValueError, OverflowError):
-            expected_qty = math.nan
-        actual_a, issue_a = fetch_leg_qty(pos.get("leg_a", {}), self.exchanges)
-        actual_b, issue_b = fetch_leg_qty(pos.get("leg_b", {}), self.exchanges)
-        data_issues = self._build_position_data_issues(
-            pos, base_asset, expected_qty, actual_a, actual_b, issue_a, issue_b
-        )
-        if data_issues:
-            if self._should_report_position_alert(base_asset, "POSITION_DATA_UNAVAILABLE", data_issues):
-                self._report_position_data_issues(data_issues)
-            return None, data_issues
-        actual_a = float(actual_a)
-        actual_b = float(actual_b)
-        leg_diff = abs(actual_a - actual_b)
-        drift = max(leg_diff, abs(actual_a - expected_qty), abs(actual_b - expected_qty))
-        if drift <= self.drift_tolerance:
-            self._position_alerts.pop(base_asset, None)
-            return None, None
-        drift_info = self._position_drift_details(pos, expected_qty, actual_a, actual_b, leg_diff)
-        if self._should_report_position_alert(base_asset, "POSITION_DRIFT", drift_info):
-            self._report_position_drift(drift_info)
-        return drift_info, None
-
-    def _position_drift_details(
-        self,
-        pos: Dict[str, Any],
-        expected_qty: float,
-        actual_a: float,
-        actual_b: float,
-        leg_diff: float,
-    ) -> Dict[str, Any]:
-        leg_a, leg_b = pos["leg_a"], pos["leg_b"]
-        return {
-            "base_asset": pos.get("base_asset", "UNKNOWN"),
-            "expected_qty": expected_qty,
-            "actual_qty_a": actual_a,
-            "actual_qty_b": actual_b,
-            "leg_drift": leg_diff,
-            "leg_a_exchange": leg_a.get("exchange", "unknown"),
-            "leg_a_symbol": leg_symbol(leg_a),
-            "leg_b_exchange": leg_b.get("exchange", "unknown"),
-            "leg_b_symbol": leg_symbol(leg_b),
-        }
-
-    def _report_position_drift(self, details: Dict[str, Any]) -> None:
-        self._record_risk("POSITION_DRIFT", "WARNING", details)
-        self.notifier.send(
-            f"[DRIFT] {details['base_asset']}: {details['leg_a_exchange']} "
-            f"{details['leg_a_symbol']}={details['actual_qty_a']}, "
-            f"{details['leg_b_exchange']} {details['leg_b_symbol']}={details['actual_qty_b']}; "
-            f"expected={details['expected_qty']}, leg_drift={details['leg_drift']}"
-        )
-
-    def _should_report_position_alert(
-        self, base_asset: str, event_type: str, details: Dict[str, Any]
-    ) -> bool:
-        now_ms = int(time.time() * 1000)
-        fingerprint = json.dumps({"event_type": event_type, "details": details}, sort_keys=True)
-        previous = self._position_alerts.get(base_asset)
-        if previous and previous[0] == fingerprint:
-            if now_ms - previous[1] < POSITION_ALERT_INTERVAL_MS:
-                return False
-        self._position_alerts[base_asset] = (fingerprint, now_ms)
+    def maybe_clear_auto_kill_switch(self) -> bool:
+        """Resume trading after automatic halts once no exposure remains."""
+        if not self._kill_switch_active():
+            return False
+        reason = self._kill_switch_reason()
+        if not reason.startswith(AUTO_REASON_PREFIX) and reason != LEGACY_KILL_REASON:
+            return False
+        if self._load_positions():
+            return False
+        self.redis.set(KILL_SWITCH_KEY, "false")
+        self.redis.set(KILL_SWITCH_REASON_KEY, "")
+        self.notifier.send(f"[RECOVERY] Kill-switch auto-cleared ({reason}); all legs flat, entries resumed")
+        self._record_risk("KILL_SWITCH_AUTO_CLEARED", "INFO", {"reason": reason})
         return True
-
-    def _build_position_data_issues(
-        self,
-        pos: Dict[str, Any],
-        base_asset: str,
-        expected_qty: float,
-        actual_a: Optional[float],
-        actual_b: Optional[float],
-        issue_a: Optional[str],
-        issue_b: Optional[str],
-    ) -> Optional[Dict[str, Any]]:
-        issues = []
-        if not math.isfinite(expected_qty):
-            issues.append({"leg": "position", "issue": "stored expected quantity invalid"})
-        for key, actual, issue in (("leg_a", actual_a, issue_a), ("leg_b", actual_b, issue_b)):
-            if issue or actual is None or not math.isfinite(actual):
-                leg = pos.get(key, {})
-                issues.append(
-                    {
-                        "leg": key,
-                        "exchange": leg.get("exchange", "unknown"),
-                        "symbol": leg_symbol(leg),
-                        "issue": issue or "actual quantity invalid",
-                    }
-                )
-        return {"base_asset": base_asset, "issues": issues} if issues else None
-
-    def _report_position_data_issues(self, details: Dict[str, Any]) -> None:
-        self._record_risk("POSITION_DATA_UNAVAILABLE", "WARNING", details)
-        description = "; ".join(
-            f"{issue['leg']} {issue.get('exchange', '')} {issue.get('symbol', '')}: {issue['issue']}"
-            for issue in details["issues"]
-        )
-        self.notifier.send(f"[DRIFT DATA UNAVAILABLE] {details['base_asset']}: {description}")
 
     def _okx_margin_ratio(self, info: Dict[str, Any]) -> Optional[float]:
         data = info.get("data")
@@ -313,50 +177,68 @@ class RiskWatchdog:
         statuses: Dict[str, str] = {}
         for ex_name, ratio in margin_snapshots.items():
             usage = float(ratio)
+            previous = self._margin_status.get(ex_name)
             if usage > self.margin_critical_threshold:
                 statuses[ex_name] = "CRITICAL"
-                self.activate_kill_switch(f"{ex_name} margin_usage={usage:.2%} > {self.margin_critical_threshold:.0%}")
+                self.activate_kill_switch(
+                    f"{ex_name} margin_usage={usage:.2%} > {self.margin_critical_threshold:.0%}", auto=True
+                )
             elif usage > self.margin_warning_threshold:
                 statuses[ex_name] = "WARNING"
-                self.notifier.send(
-                    f"[WARNING] {ex_name} margin usage high: {usage:.2%} (threshold {self.margin_warning_threshold:.0%})"
-                )
+                if previous != "WARNING":
+                    self.notifier.send(
+                        f"[WARNING] {ex_name} margin usage high: {usage:.2%} "
+                        f"(threshold {self.margin_warning_threshold:.0%})"
+                    )
             else:
                 statuses[ex_name] = "OK"
+            self._margin_status[ex_name] = statuses[ex_name]
         return statuses
+
+    def _unwind_attempt_allowed(self, base_asset: str) -> bool:
+        attempts, last_ms = self._unwind_attempts.get(base_asset, (0, 0))
+        if attempts == 0:
+            return True
+        return int(time.time() * 1000) - last_ms >= UNWIND_RETRY_INTERVAL_MS
+
+    def _register_unwind_attempt(self, base_asset: str) -> int:
+        attempts = self._unwind_attempts.get(base_asset, (0, 0))[0] + 1
+        self._unwind_attempts[base_asset] = (attempts, int(time.time() * 1000))
+        return attempts
 
     def _execute_unwind_and_finalize(self, position: Dict[str, Any], trigger: str) -> Dict[str, Any]:
         base_asset = position.get("base_asset", "UNKNOWN")
         if self.unwind_callback is None:
             return {"status": "UNWIND_RECOMMENDED"}
+        if not self._unwind_attempt_allowed(base_asset):
+            return {"status": "UNWIND_THROTTLED", "base_asset": base_asset}
+        attempts = self._register_unwind_attempt(base_asset)
         try:
             result = self.unwind_callback(position)
         except Exception as exc:
             result = {"status": "UNWIND_PENDING", "error": str(exc)}
         if self.finalize_verified_close(position, result, trigger):
             return result
-        details = {"base_asset": base_asset, "trigger": trigger, "unwind_result": result}
+        details = {"base_asset": base_asset, "trigger": trigger, "attempt": attempts, "unwind_result": result}
         self._record_risk("UNWIND_UNVERIFIED", "CRITICAL", details)
-        self.activate_kill_switch(f"{trigger} unwind not verified for {base_asset}")
+        if attempts >= MAX_UNWIND_ATTEMPTS:
+            self.activate_kill_switch(f"{trigger} unwind not verified for {base_asset}", auto=True)
+        else:
+            self.notifier.send(
+                f"[UNWIND RETRY] {base_asset} ({trigger}) attempt {attempts}/{MAX_UNWIND_ATTEMPTS} "
+                f"not verified; retrying in {UNWIND_RETRY_INTERVAL_MS // 1000}s (exits keep running)"
+            )
         return result
 
     def finalize_verified_close(
         self, position: Dict[str, Any], result: Dict[str, Any], close_reason: str
     ) -> bool:
-        verified = result.get("status") == "UNWOUND_VERIFIED" and result.get("verified_flat") is True
+        status = result.get("status")
+        verified = result.get("verified_flat") is True and status in ("UNWOUND_VERIFIED", "STALE_FLAT")
         if not verified:
             return False
-        pnl = calculate_realized_price_pnl(position, result)
-        result["realized_pnl_usdt"] = pnl
-        result["realized_pnl_scope"] = "gross_price_before_fees_and_funding"
-        result["close_reason"] = close_reason
-        base_asset = position.get("base_asset", "UNKNOWN")
-        self.mark_position_closed(base_asset, pnl, close_reason)
-        if hasattr(self.notifier, "notify_position_closed"):
-            try:
-                self.notifier.notify_position_closed(result, base_asset)
-            except Exception as exc:
-                logger.warning("Telegram notify_position_closed failed: %s", exc)
+        self._finalize_position(position, result, close_reason)
+        self._unwind_attempts.pop(position.get("base_asset", ""), None)
         return True
 
     def check_adl_indicators(self, positions: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
@@ -462,9 +344,10 @@ class RiskWatchdog:
         raw = self.redis.get(REDIS_POSITIONS_KEY)
         if isinstance(raw, bytes):
             raw = raw.decode("utf-8")
-        if raw:
-            try:
-                positions = [p for p in json.loads(raw) if p.get("base_asset") != base_asset]
-                self.redis.set(REDIS_POSITIONS_KEY, json.dumps(positions))
-            except Exception:
-                pass
+        if not raw:
+            return
+        try:
+            positions = [p for p in json.loads(raw) if p.get("base_asset") != base_asset]
+            self.redis.set(REDIS_POSITIONS_KEY, json.dumps(positions))
+        except Exception:
+            pass

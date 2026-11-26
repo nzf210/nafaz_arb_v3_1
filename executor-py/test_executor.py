@@ -66,6 +66,8 @@ class MockExchange:
             "status": status,
         }
         self.orders.append(order)
+        if order_type == "market":
+            self.positions = []
         return order
 
     def cancel_order(self, order_id: str, symbol: str | None = None):
@@ -262,6 +264,8 @@ def test_leg_b_failure_triggers_emergency_unwind_on_leg_a():
 def test_unwind_route_closes_both_legs():
     ex_okx = MockExchange("okx")
     ex_bybit = MockExchange("bybit")
+    ex_okx.positions = [{"symbol": "BTC/USDT:USDT", "contracts": 0.05}]
+    ex_bybit.positions = [{"symbol": "BTC/USDT:USDT", "contracts": 0.05}]
     executor = DeltaNeutralExecutor({"okx": ex_okx, "bybit": ex_bybit})
     position = {
         "base_asset": "BTC",
@@ -331,7 +335,8 @@ def test_watchdog_reconciliation_margin_and_adl():
     unwound = watchdog.check_adl_indicators(adl_positions)
     assert len(unwound) == 1
     assert unwound[0]["adl_rank"] == 4
-    assert unwound[0]["unwind"]["status"] == "UNWIND_PENDING"
+    assert unwound[0]["unwind"]["status"] == "UNWOUND_VERIFIED"
+    assert unwound[0]["unwind"]["verified_flat"] is True
     assert redis.get("core:kill_switch") == "true"
     assert any("[ADL WARNING]" in m for m in notifier.outbox)
 
@@ -462,9 +467,8 @@ def test_live_balance_check_ccxt_margin_adl_and_preflight():
     unwound = watchdog.check_adl_indicators()
     assert len(unwound) == 1
     assert unwound[0]["adl_rank"] == 4
-    remaining_positions = json.loads(redis.get("core:positions"))
-    assert len(remaining_positions) == 1
-    assert remaining_positions[0]["base_asset"] == "BTC"
+    # Verified unwind finalizes the position (book closed) instead of leaving a stale row.
+    assert json.loads(redis.get("core:positions")) == []
 
     # Auto-exit when funding spread flips negative (including perp-perp interval mismatch)
     ex_okx.fetch_funding_rate = lambda sym: {"fundingRate": 0.0002}

@@ -117,7 +117,8 @@ def format_menu() -> str:
         "• <code>/status</code> — Kondisi engine, bursa, & kill-switch\n"
         "• <code>/positions</code> — Posisi aktif Spot-Perp & tombol force close\n"
         "• <code>/balance</code> — Saldo live seluruh CEX\n"
-        "• <code>/history</code> — 10 eksekusi transaksi terakhir\n"
+        "• <code>/history</code> — 10 transaksi selesai + PnL\n"
+        "• <code>/pnl</code> — Ringkasan realized PnL\n"
         "• <code>/latest</code> — 10 sinyal peluang arbitrase terakhir\n"
         "• <code>/settings</code> — Konfigurasi profil & limit modal\n"
         "• <code>/risk</code> — Status margin ratio & ADL rank\n"
@@ -134,7 +135,8 @@ def format_help() -> str:
         "• <code>/status</code> — Ringkasan status sistem & bursa\n"
         "• <code>/positions</code> — Pantau posisi terbuka & PnL\n"
         "• <code>/balance</code> — Cek saldo live exchange\n"
-        "• <code>/history</code> — Riwayat eksekusi selesai\n"
+        "• <code>/history</code> — Riwayat transaksi selesai + PnL\n"
+        "• <code>/pnl</code> — Ringkasan realized PnL & win/loss\n"
         "• <code>/latest</code> — Peluang dari scan terakhir\n"
         "• <code>/pair &lt;ASET&gt;</code> — Cek peluang koin tertentu (cth: /pair BTC)\n"
         "• <code>/metrics</code> — Statistik rejeksi & evaluasi\n\n"
@@ -227,21 +229,62 @@ def format_balance(exchanges_data: Dict[str, Dict[str, Any]], dry_run: bool) -> 
     return "\n".join(lines).strip()
 
 
-def format_history(executions: List[Dict[str, Any]]) -> str:
-    if not executions:
-        return "📜 <b>Riwayat Transaksi</b>\n\n<i>Belum ada eksekusi tercatat di database.</i>"
-    lines = ["📜 <b>10 Riwayat Transaksi Terakhir</b>\n"]
-    for i, ex in enumerate(executions, 1):
-        asset = html.escape(str(ex.get("base_asset", ""))).upper()
-        st = html.escape(str(ex.get("status", "")))
-        qty = float(ex.get("qty", 0.0))
-        notional = float(ex.get("effective_notional_usdt", 0.0))
-        dry = TEXT_SIMULASI if ex.get("dry_run") else TEXT_LIVE
-        t = str(ex.get("created_at", ""))[:19]
+def _format_pnl_value(trade: Dict[str, Any]) -> str:
+    pnl = trade.get("realized_pnl_usdt")
+    if pnl is None:
+        return "<i>PnL tidak tersedia</i>"
+    fees = float(trade.get("fees_usdt") or 0.0)
+    net = trade.get("net_pnl_usdt")
+    net_txt = f"{float(net):+.4f}" if net is not None else "n/a"
+    fee_txt = f" | fee <code>{fees:.4f}</code>" if fees else ""
+    return f"PnL <b>{float(pnl):+.4f} {TEXT_USDT}</b> (net {net_txt}){fee_txt}"
+
+
+def format_history(trades: List[Dict[str, Any]], summary: Optional[Dict[str, Any]] = None) -> str:
+    if not trades:
+        return "📜 <b>Riwayat Transaksi</b>\n\n<i>Belum ada posisi selesai dengan PnL tercatat.</i>"
+    lines = ["📜 <b>10 Transaksi Selesai Terakhir</b>\n"]
+    if summary:
         lines.append(
-            f"<b>{i}. {asset}</b> — <code>{st}</code> [{dry}]\n"
-            f"• Qty: <code>{qty:.4f}</code> | Notional: <code>${notional:.2f}</code> | {t}\n"
+            f"• <b>Total Realized PnL:</b> <b>{float(summary.get('realized_pnl_usdt', 0.0)):+.4f} {TEXT_USDT}</b>\n"
+            f"• <b>Net (setelah fee):</b> <b>{float(summary.get('net_pnl_usdt', 0.0)):+.4f} {TEXT_USDT}</b>\n"
+            f"• <b>24 Jam:</b> <code>{float(summary.get('pnl_24h_usdt', 0.0)):+.4f} {TEXT_USDT}</code>\n"
+            f"• <b>Trade:</b> <code>{summary.get('trades', 0)}</code> "
+            f"(win {summary.get('wins', 0)} / loss {summary.get('losses', 0)} / n/a {summary.get('unpriced_trades', 0)})\n"
         )
+    for i, tr in enumerate(trades, 1):
+        asset = html.escape(str(tr.get("base_asset", ""))).upper()
+        qty = float(tr.get("qty", 0.0))
+        ex_a = html.escape(str(tr.get("leg_a_exchange") or "?").upper())
+        ex_b = html.escape(str(tr.get("leg_b_exchange") or "?").upper())
+        reason = html.escape(str(tr.get("close_reason") or "-"))
+        t = str(tr.get("closed_at", ""))[:19]
+        lines.append(
+            f"<b>{i}. {asset}</b> <code>{ex_a}/{ex_b}</code> — qty <code>{qty:.4f}</code>\n"
+            f"• {_format_pnl_value(tr)}\n"
+            f"• Alasan: <i>{reason}</i> | {t}\n"
+        )
+    return "\n".join(lines).strip()
+
+
+def format_pnl_summary(summary: Dict[str, Any], recent: Optional[List[Dict[str, Any]]] = None) -> str:
+    if not summary:
+        return "💵 <b>Ringkasan PnL</b>\n\n<i>Belum ada transaksi selesai tercatat.</i>"
+    lines = [
+        "💵 <b>Ringkasan Realized PnL</b>\n",
+        f"• <b>Total Gross:</b> <b>{float(summary.get('realized_pnl_usdt', 0.0)):+.4f} {TEXT_USDT}</b>",
+        f"• <b>Total Fee:</b> <code>{float(summary.get('fees_usdt', 0.0)):.4f} {TEXT_USDT}</code>",
+        f"• <b>Net:</b> <b>{float(summary.get('net_pnl_usdt', 0.0)):+.4f} {TEXT_USDT}</b>",
+        f"• <b>PnL 24 Jam:</b> <code>{float(summary.get('pnl_24h_usdt', 0.0)):+.4f} {TEXT_USDT}</code>\n",
+        f"• <b>Trade Selesai:</b> <code>{summary.get('trades', 0)}</code>",
+        f"• <b>Win/Loss:</b> <code>{summary.get('wins', 0)}/{summary.get('losses', 0)}</code>",
+        f"• <b>Tanpa Harga (n/a):</b> <code>{summary.get('unpriced_trades', 0)}</code>",
+    ]
+    if recent:
+        lines.append("\n📜 <b>Terakhir:</b>")
+        for tr in recent[:5]:
+            asset = html.escape(str(tr.get("base_asset", ""))).upper()
+            lines.append(f"• {asset}: {_format_pnl_value(tr)}")
     return "\n".join(lines).strip()
 
 

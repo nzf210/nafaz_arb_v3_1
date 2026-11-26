@@ -2,7 +2,8 @@
 
 import pytest
 
-from exit_rules import basis_exit_reason, calculate_basis_spread, calculate_realized_price_pnl
+from exit_rules import basis_exit_reason, calculate_basis_spread
+from pnl import compute_realized_pnl
 from watchdog import RiskWatchdog, TelegramNotifier
 
 
@@ -75,18 +76,27 @@ def test_watchdog_fetches_live_basis_and_applies_exit_limits(short_mark, expecte
     assert exited[0]["unwind"]["realized_pnl_usdt"] == pytest.approx(0.01)
 
 
-def test_realized_price_pnl_requires_verified_average_close_prices():
+def test_realized_pnl_falls_back_to_recorded_entry_and_exit_prices():
     position = _position("funding_carry_core")
     result = {
         "verified_flat": True,
         "order_a": {"average": 101.0},
         "order_b": {"average": 100.0},
     }
-    assert calculate_realized_price_pnl(position, result) == pytest.approx(0.3)
-    assert calculate_realized_price_pnl(position, {"verified_flat": False}) is None
-    assert calculate_realized_price_pnl(position, {"verified_flat": True}) is None
+    assert compute_realized_pnl(position, result)["realized_pnl_usdt"] == pytest.approx(0.3)
+    # No close average: cost/filled fallback derives the exit price.
+    fallback = compute_realized_pnl(
+        position,
+        {"order_a": {"filled": 0.1, "cost": 10.1}, "order_b": {"filled": 0.1, "cost": 10.2}},
+    )
+    assert fallback["realized_pnl_usdt"] == pytest.approx(0.1)
+    # Missing fill data still reports a leg without PnL instead of silently blanking the trade.
+    unavailable = compute_realized_pnl(position, {"order_a": {}, "order_b": {}})
+    assert unavailable["realized_pnl_usdt"] is None
+    assert unavailable["pnl_status"] == "unavailable"
+    # Recorded entry price is used when entry_avg_price is absent.
     position["leg_a"].pop("entry_avg_price")
-    assert calculate_realized_price_pnl(position, result) is None
+    assert compute_realized_pnl(position, result)["realized_pnl_usdt"] == pytest.approx(0.3)
 
 
 class FailingFundingExchange:

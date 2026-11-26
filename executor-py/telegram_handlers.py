@@ -50,8 +50,14 @@ def handle_balance(bot: Any, chat_id: int, user_id: int, args: List[str]) -> Non
 
 
 def handle_history(bot: Any, chat_id: int, user_id: int, args: List[str]) -> None:
-    history = bot.get_recent_executions(10)
-    bot.send_message(chat_id, tf.format_history(history), reply_markup=tf.default_keyboard())
+    trades = bot.get_closed_trades(10)
+    summary = bot.get_pnl_summary()
+    bot.send_message(chat_id, tf.format_history(trades, summary), reply_markup=tf.default_keyboard())
+
+def handle_pnl(bot: Any, chat_id: int, user_id: int, args: List[str]) -> None:
+    summary = bot.get_pnl_summary()
+    recent = bot.get_closed_trades(5)
+    bot.send_message(chat_id, tf.format_pnl_summary(summary, recent), reply_markup=tf.default_keyboard())
 
 
 def handle_latest(bot: Any, chat_id: int, user_id: int, args: List[str]) -> None:
@@ -178,6 +184,7 @@ COMMAND_DISPATCH = {
     "/position": handle_position_detail,
     "/balance": handle_balance,
     "/history": handle_history,
+    "/pnl": handle_pnl,
     "/latest": handle_latest,
     "/pair": handle_pair,
     "/metrics": handle_metrics,

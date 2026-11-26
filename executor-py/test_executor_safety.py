@@ -80,6 +80,8 @@ def test_unwind_remains_pending_when_close_orders_are_partially_filled():
 
     ex_a = PartialCloseExchange("okx")
     ex_b = PartialCloseExchange("bybit")
+    ex_a.positions = [{"symbol": "BTC/USDT:USDT", "contracts": 0.05}]
+    ex_b.positions = [{"symbol": "BTC/USDT:USDT", "contracts": 0.05}]
     executor = DeltaNeutralExecutor({"okx": ex_a, "bybit": ex_b})
     position = {
         "base_asset": "BTC",
@@ -151,7 +153,7 @@ def test_unknown_fill_state_aborts_instead_of_assuming_hedge():
 
 def test_watchdog_keeps_position_when_unwind_unverified():
     redis = MockRedis()
-    ex_okx = MockExchange("okx")
+    ex_okx = MockExchange("okx", fail_create=True)
     ex_bybit = MockExchange("bybit")
     notifier = TelegramNotifier(dry_run=True)
     executor = DeltaNeutralExecutor({"okx": ex_okx, "bybit": ex_bybit}, notifier=notifier.send)
@@ -173,10 +175,27 @@ def test_watchdog_keeps_position_when_unwind_unverified():
     unwound = watchdog.check_adl_indicators()
     assert len(unwound) == 1
     assert unwound[0]["unwind"]["status"] == "UNWIND_PENDING"
-    assert redis.get("core:kill_switch") == "true"
+    # One failed unwind retries instead of halting the whole bot immediately.
+    assert redis.get("core:kill_switch") is None
     remaining = json.loads(redis.get("core:positions"))
     assert len(remaining) == 1
     assert remaining[0]["base_asset"] == "BTC"
+
+    # Third failed attempt escalates to an auto-clearing kill-switch.
+    for _ in range(2):
+        attempts, _ts = watchdog._unwind_attempts["BTC"]
+        watchdog._unwind_attempts["BTC"] = (attempts, 0)
+        watchdog.check_adl_indicators()
+    assert redis.get("core:kill_switch") == "true"
+    assert str(redis.get("core:kill_switch_reason")).startswith("auto:")
+    # Kill-switch does not block exits: once both legs are flat the stale position is
+    # finalized and the automatic halt clears itself, resuming entries.
+    ex_okx.positions = []
+    ex_bybit.positions = []
+    rec = watchdog.reconcile_positions()
+    assert rec["repaired"][0]["action"] == "stale_flat_close"
+    assert json.loads(redis.get("core:positions")) == []
+    assert redis.get("core:kill_switch") == "false"
 
 
 def test_canary_min_lot_missing_credentials_and_okx_posside_fallback():
