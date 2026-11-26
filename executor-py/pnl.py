@@ -103,7 +103,7 @@ def _leg_pnl(leg: Dict[str, Any], order: Optional[Dict[str, Any]], qty: float) -
     entry = leg_entry_price(leg)
     exit_price = order_price(order)
     if direction is None or entry is None or exit_price is None or qty <= QTY_EPSILON:
-        return None, entry or 0.0, exit_price or 0.0, order_fee_usdt(order)
+        return None, entry, exit_price, order_fee_usdt(order)
     return (exit_price - entry) * qty * direction, entry, exit_price, order_fee_usdt(order)
 
 

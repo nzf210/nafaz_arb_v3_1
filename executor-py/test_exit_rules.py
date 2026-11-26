@@ -94,6 +94,7 @@ def test_realized_pnl_falls_back_to_recorded_entry_and_exit_prices():
     unavailable = compute_realized_pnl(position, {"order_a": {}, "order_b": {}})
     assert unavailable["realized_pnl_usdt"] is None
     assert unavailable["pnl_status"] == "unavailable"
+    assert unavailable["legs"]["leg_a"]["exit_price"] is None, "missing price must stay NULL, not 0.0"
     # Recorded entry price is used when entry_avg_price is absent.
     position["leg_a"].pop("entry_avg_price")
     assert compute_realized_pnl(position, result)["realized_pnl_usdt"] == pytest.approx(0.3)
