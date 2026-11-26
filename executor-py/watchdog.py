@@ -6,7 +6,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 
 from exit_monitor import evaluate_position_exit, fetch_leg_marks
-from exit_policy import DEFAULT_EXIT_POLICY, decide_exit
+from exit_policy import decide_exit
 from exit_rules import DEFAULT_PROFILE_EXIT_SETTINGS
 from notifier import TelegramNotifier
 from pnl import estimate_price_pnl
@@ -76,10 +76,13 @@ class RiskWatchdog(ReconcileMixin):
                 "target_hold_days",
                 "basis_target_spread",
                 "basis_adverse_stop_spread",
-                *DEFAULT_EXIT_POLICY,
+                "min_profit_usdt",
+                "max_loss_usdt",
             ):
                 if profile.get(key) is not None:
                     resolved[key] = float(profile[key])
+            if profile.get("allow_loss_on_hold") is not None:
+                resolved["allow_loss_on_hold"] = bool(profile["allow_loss_on_hold"])
         return settings
 
     def _record_risk(self, event_type: str, severity: str, details: Dict[str, Any]) -> None:
