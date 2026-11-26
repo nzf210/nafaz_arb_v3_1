@@ -76,19 +76,23 @@ def leg_entry_price(leg: Dict[str, Any]) -> Optional[float]:
     return None
 
 
-def order_fee_usdt(order: Optional[Dict[str, Any]]) -> float:
-    """Extract absolute fee cost from a ccxt order payload."""
+def order_fee_usdt(order: Optional[Dict[str, Any]]) -> Optional[float]:
+    """Extract a fee; return None when the order payload does not establish one."""
     if not isinstance(order, dict):
-        return 0.0
+        return None
     fee = order.get("fee")
     cost = _positive((fee or {}).get("cost")) if isinstance(fee, dict) else None
     if cost:
         return cost
     total = 0.0
+    found = False
     for entry in order.get("fees") or []:
         if isinstance(entry, dict):
-            total += _positive(entry.get("cost")) or 0.0
-    return total
+            entry_cost = _positive(entry.get("cost"))
+            if entry_cost is not None:
+                found = True
+                total += entry_cost
+    return total if found else None
 
 
 def leg_closed_qty(position: Dict[str, Any], unwind: Dict[str, Any], suffix: str) -> float:
@@ -98,13 +102,25 @@ def leg_closed_qty(position: Dict[str, Any], unwind: Dict[str, Any], suffix: str
     return _positive(position.get("qty")) or 0.0
 
 
-def _leg_pnl(leg: Dict[str, Any], order: Optional[Dict[str, Any]], qty: float) -> tuple[Optional[float], float, float, float]:
+def _leg_pnl(leg: Dict[str, Any], order: Optional[Dict[str, Any]], qty: float) -> tuple[Optional[float], float, float, Optional[float]]:
     direction = resolve_direction(leg)
     entry = leg_entry_price(leg)
     exit_price = order_price(order)
+    exit_fee = order_fee_usdt(order)
+    entry_fee = leg.get("entry_fee_usdt")
+    try:
+        entry_fee_value = float(entry_fee) if entry_fee is not None else None
+    except (TypeError, ValueError, OverflowError):
+        entry_fee_value = None
+    if entry_fee_value is not None and math.isfinite(entry_fee_value) and entry_fee_value >= 0:
+        fee = exit_fee
+        if fee is not None:
+            fee += entry_fee_value
+    else:
+        fee = None
     if direction is None or entry is None or exit_price is None or qty <= QTY_EPSILON:
-        return None, entry, exit_price, order_fee_usdt(order)
-    return (exit_price - entry) * qty * direction, entry, exit_price, order_fee_usdt(order)
+        return None, entry, exit_price, fee
+    return (exit_price - entry) * qty * direction, entry, exit_price, fee
 
 
 def compute_realized_pnl(position: Dict[str, Any], unwind: Dict[str, Any]) -> Dict[str, Any]:
@@ -116,6 +132,15 @@ def compute_realized_pnl(position: Dict[str, Any], unwind: Dict[str, Any]) -> Di
     """
     gross = 0.0
     fees = 0.0
+    fee_data_available = True
+    funding_data_available = "funding_usdt" in unwind
+    funding_usdt = 0.0
+    if funding_data_available:
+        try:
+            funding_usdt = float(unwind.get("funding_usdt"))
+            funding_data_available = math.isfinite(funding_usdt)
+        except (TypeError, ValueError, OverflowError):
+            funding_data_available = False
     priced_legs = 0
     legs: Dict[str, Any] = {}
     for leg_key, order_key, suffix in (("leg_a", "order_a", "a"), ("leg_b", "order_b", "b")):
@@ -123,7 +148,10 @@ def compute_realized_pnl(position: Dict[str, Any], unwind: Dict[str, Any]) -> Di
         order = unwind.get(order_key)
         qty = leg_closed_qty(position, unwind, suffix)
         leg_pnl, entry, exit_price, fee = _leg_pnl(leg, order, qty)
-        fees += fee
+        if fee is None:
+            fee_data_available = False
+        else:
+            fees += fee
         if leg_pnl is not None:
             gross += leg_pnl
             priced_legs += 1
@@ -135,13 +163,23 @@ def compute_realized_pnl(position: Dict[str, Any], unwind: Dict[str, Any]) -> Di
             "fee_usdt": fee,
         }
     realized = gross if priced_legs else None
-    net = (realized - fees) if realized is not None else None
+    net = (
+        realized - fees - funding_usdt
+        if realized is not None and fee_data_available and funding_data_available
+        else None
+    )
     pnl_status = "complete" if priced_legs == 2 else ("partial" if priced_legs == 1 else "unavailable")
+    if pnl_status != "unavailable" and not fee_data_available:
+        pnl_status = "fee_unavailable"
+    if pnl_status == "complete" and not funding_data_available:
+        pnl_status = "funding_unavailable"
     return {
         "realized_pnl_usdt": realized,
-        "fees_usdt": fees,
+        "fees_usdt": fees if fee_data_available else None,
+        "funding_usdt": funding_usdt if funding_data_available else None,
         "net_pnl_usdt": net,
         "pnl_status": pnl_status,
+        "fee_status": "complete" if fee_data_available else "unavailable",
         "legs": legs,
     }
 

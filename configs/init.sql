@@ -122,12 +122,18 @@ CREATE TABLE IF NOT EXISTS closed_trades (
 
 CREATE INDEX IF NOT EXISTS idx_closed_trades_closed_at ON closed_trades (closed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_closed_trades_asset ON closed_trades (base_asset);
+ALTER TABLE closed_trades ALTER COLUMN fees_usdt DROP NOT NULL;
 
 ALTER TABLE runtime_settings ADD COLUMN IF NOT EXISTS min_profit_usdt DOUBLE PRECISION;
 ALTER TABLE runtime_settings ADD COLUMN IF NOT EXISTS max_loss_usdt DOUBLE PRECISION;
 ALTER TABLE runtime_settings ADD COLUMN IF NOT EXISTS allow_loss_on_hold BOOLEAN;
+ALTER TABLE runtime_settings ADD COLUMN IF NOT EXISTS funding_flip_confirm_samples INTEGER;
+ALTER TABLE runtime_settings ADD COLUMN IF NOT EXISTS funding_flip_confirm_window_ms BIGINT;
 
 UPDATE runtime_settings
 SET min_profit_usdt = COALESCE(min_profit_usdt, 0.0),
     max_loss_usdt = COALESCE(max_loss_usdt, 0.05),
     allow_loss_on_hold = COALESCE(allow_loss_on_hold, FALSE);
+UPDATE runtime_settings
+SET funding_flip_confirm_samples = COALESCE(funding_flip_confirm_samples, 3),
+    funding_flip_confirm_window_ms = COALESCE(funding_flip_confirm_window_ms, 300000);

@@ -167,6 +167,7 @@ class ReconcileMixin:
                 "realized_pnl_net_usdt": pnl["net_pnl_usdt"],
                 "fees_usdt": pnl["fees_usdt"],
                 "pnl_status": pnl["pnl_status"],
+                "fee_status": pnl["fee_status"],
                 "pnl_legs": pnl["legs"],
                 "close_reason": close_reason,
             }

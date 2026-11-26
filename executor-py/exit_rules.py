@@ -7,11 +7,17 @@ from execution import action_to_side
 
 BASIS_PROFILE_ID = "basis_convergence_fast"
 DEFAULT_PROFILE_EXIT_SETTINGS = {
-    "funding_carry_core": {"target_hold_days": 7.0},
+    "funding_carry_core": {
+        "target_hold_days": 7.0,
+        "funding_flip_confirm_samples": 3,
+        "funding_flip_confirm_window_ms": 300_000,
+    },
     BASIS_PROFILE_ID: {
         "target_hold_days": 1.0,
         "basis_target_spread": 0.001,
         "basis_adverse_stop_spread": 0.005,
+        "funding_flip_confirm_samples": 3,
+        "funding_flip_confirm_window_ms": 300_000,
     },
 }
 

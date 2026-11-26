@@ -7,7 +7,7 @@ import time
 from typing import Any, Callable, Dict, Optional
 
 from execution_unwind import UnwindMixin
-from pnl import resolve_fill_price
+from pnl import order_fee_usdt, resolve_fill_price
 
 logger = logging.getLogger(__name__)
 
@@ -313,8 +313,8 @@ class DeltaNeutralExecutor(UnwindMixin):
             "status": status, "signal_id": signal["signal_id"], "base_asset": signal["base_asset"],
             "qty": filled_a, "qty_requested": qty, "qty_filled_a": filled_a, "qty_filled_b": filled_b,
             "price_a": price_a, "price_b": price_b,
-            "leg_a": {"exchange": leg_a["exchange"], "symbol": sym_a, "side": side_a, "price": price_a, "entry_avg_price": average_a, "qty": filled_a},
-            "leg_b": {"exchange": leg_b["exchange"], "symbol": sym_b, "side": side_b, "price": price_b, "entry_avg_price": average_b, "qty": filled_b},
+            "leg_a": {"exchange": leg_a["exchange"], "symbol": sym_a, "side": side_a, "price": price_a, "entry_avg_price": average_a, "qty": filled_a, "entry_fee_usdt": order_fee_usdt(order_a)},
+            "leg_b": {"exchange": leg_b["exchange"], "symbol": sym_b, "side": side_b, "price": price_b, "entry_avg_price": average_b, "qty": filled_b, "entry_fee_usdt": order_fee_usdt(order_b)},
             "cancelled_unfilled_a": cancelled_unfilled_a, "order_a": order_a, "order_b": order_b,
         }
 

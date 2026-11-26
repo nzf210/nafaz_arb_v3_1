@@ -43,7 +43,11 @@ def decide_exit(reason: str, pnl_usdt: Optional[float], settings: Optional[Dict[
     policy = resolve_policy(settings)
     min_profit = policy["min_profit_usdt"]
     if pnl_usdt is None:
-        return True, "pnl_unavailable_allow"
+        if reason.startswith(PROFIT_REASONS):
+            return False, "profit_pending(pnl_unavailable)"
+        if reason.startswith(LOSS_GATED_REASONS):
+            return False, "loss_blocked(pnl_unavailable)"
+        return True, "risk_exit(pnl_unavailable)"
     profitable = pnl_usdt > min_profit
     if reason.startswith(PROFIT_REASONS):
         if profitable:

@@ -473,14 +473,14 @@ def test_live_balance_check_ccxt_margin_adl_and_preflight():
     # Auto-exit when funding spread flips negative (including perp-perp interval mismatch)
     ex_okx.fetch_funding_rate = lambda sym: {"fundingRate": 0.0002}
     ex_bybit.fetch_funding_rate = lambda sym: {"fundingRate": 0.0001}
+    ex_okx.fetch_ticker = lambda sym: {"mark": 210.0}
+    ex_bybit.fetch_ticker = lambda sym: {"mark": 190.0}
     redis.set(
         "core:positions",
-        json.dumps([{"base_asset": "ETH", "qty": 0.1, "leg_a": {"exchange": "okx", "symbol": "ETH/USDT:USDT", "side": "buy", "interval_hours": 1}, "leg_b": {"exchange": "bybit", "symbol": "ETH/USDT:USDT", "side": "sell", "interval_hours": 8}}]),
+        json.dumps([{"base_asset": "ETH", "profile_id": "funding_carry_core", "qty": 0.1, "leg_a": {"exchange": "okx", "symbol": "ETH/USDT:USDT", "side": "buy", "interval_hours": 1, "entry_avg_price": 200.0}, "leg_b": {"exchange": "bybit", "symbol": "ETH/USDT:USDT", "side": "sell", "interval_hours": 8, "entry_avg_price": 200.0}}]),
     )
     exited = watchdog.check_exit_conditions()
-    assert len(exited) == 1
-    assert exited[0]["base_asset"] == "ETH"
-    assert json.loads(redis.get("core:positions")) == []
+    assert exited == []
 
     # Contract multiplier (contractSize) & fetch_order fallback verification
     ex_okx.markets = {"BTC/USDT:USDT": {"contract": True, "contractSize": 0.01, "precision": {"price": 0.1, "amount": 1.0}, "limits": {"cost": {"min": 5.0}}}}

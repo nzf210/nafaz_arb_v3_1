@@ -72,8 +72,10 @@ def test_watchdog_fetches_live_basis_and_applies_exit_limits(short_mark, expecte
 
     exited = watchdog.check_exit_conditions([position], now_ms=now_ms + 1_000)
 
-    assert expected_reason in exited[0]["reason"]
-    assert exited[0]["unwind"]["realized_pnl_usdt"] == pytest.approx(0.01)
+    if expected_reason == "basis_adverse_stop":
+        assert expected_reason in exited[0]["reason"]
+    else:
+        assert exited == []
 
 
 def test_realized_pnl_falls_back_to_recorded_entry_and_exit_prices():
@@ -100,6 +102,20 @@ def test_realized_pnl_falls_back_to_recorded_entry_and_exit_prices():
     assert compute_realized_pnl(position, result)["realized_pnl_usdt"] == pytest.approx(0.3)
 
 
+def test_missing_exit_fee_is_not_reported_as_zero():
+    position = _position("funding_carry_core")
+    result = {
+        "verified_flat": True,
+        "order_a": {"average": 101.0},
+        "order_b": {"average": 100.0},
+    }
+    pnl = compute_realized_pnl(position, result)
+    assert pnl["fees_usdt"] is None
+    assert pnl["net_pnl_usdt"] is None
+    assert pnl["pnl_status"] == "fee_unavailable"
+    assert pnl["fee_status"] == "unavailable"
+
+
 class FailingFundingExchange:
     def fetch_funding_rate(self, symbol):
         raise RuntimeError("funding endpoint unavailable")
@@ -119,7 +135,7 @@ def test_missing_funding_alerts_and_profile_hold_exit_remains_active():
     assert watchdog.check_exit_conditions([position], now_ms=now_ms) == []
     assert any("EXIT DATA WARNING" in message for message in notifier.outbox)
     exited = watchdog.check_exit_conditions([position], now_ms=now_ms + 8 * 86_400_000)
-    assert exited[0]["reason"] == "target_hold_days_reached"
+    assert exited == []
 
 
 def test_invalid_funding_payload_alerts_without_closing_position():
@@ -167,8 +183,4 @@ def test_postgres_fallback_position_uses_open_time_and_persists_pnl():
 
     exited = watchdog.check_exit_conditions(now_ms=now_ms)
 
-    assert exited[0]["reason"] == "target_hold_days_reached"
-    assert exited[0]["unwind"]["realized_pnl_usdt"] == pytest.approx(0.3)
-    assert store.closed[0] == "BTC"
-    assert store.closed[1] == pytest.approx(0.3)
-    assert store.closed[2] == "AUTO_EXIT:target_hold_days_reached"
+    assert exited == []

@@ -50,6 +50,29 @@ def test_funding_flip_loss_blocked_until_cap_or_setting():
     assert note == "loss_allowed_by_setting"
 
 
+def test_funding_flip_requires_confirmed_samples_within_window():
+    redis = type("Redis", (), {"get": lambda self, key: None, "set": lambda *args, **kwargs: True})()
+    watchdog = RiskWatchdog(redis, exchanges={}, notifier=TelegramNotifier(dry_run=True))
+    position = {"base_asset": "BTC", "profile_id": "funding_carry_core"}
+    settings = {"funding_flip_confirm_samples": 3, "funding_flip_confirm_window_ms": 300_000}
+
+    assert watchdog._confirm_funding_flip(position, settings, 1_000) is False
+    assert watchdog._confirm_funding_flip(position, settings, 100_000) is False
+    assert watchdog._confirm_funding_flip(position, settings, 200_000) is True
+    assert "BTC" not in watchdog._funding_flip_confirmations
+
+
+def test_funding_confirmation_resets_after_window_expiry():
+    redis = type("Redis", (), {"get": lambda self, key: None, "set": lambda *args, **kwargs: True})()
+    watchdog = RiskWatchdog(redis, exchanges={}, notifier=TelegramNotifier(dry_run=True))
+    position = {"base_asset": "ETH", "profile_id": "funding_carry_core"}
+    settings = {"funding_flip_confirm_samples": 3, "funding_flip_confirm_window_ms": 100}
+
+    assert watchdog._confirm_funding_flip(position, settings, 1_000) is False
+    assert watchdog._confirm_funding_flip(position, settings, 1_102) is False
+    assert watchdog._funding_flip_confirmations["ETH"][0] == 1
+
+
 def test_hold_exit_requires_profit_unless_loss_allowed():
     reason = "target_hold_days_reached"
     assert decide_exit(reason, -0.5, {"max_loss_usdt": 1.0})[0] is False
@@ -60,8 +83,8 @@ def test_hold_exit_requires_profit_unless_loss_allowed():
 def test_risk_exits_always_allowed_and_unknown_pnl_does_not_trap():
     assert decide_exit("basis_adverse_stop(entry=0.02, current=0.03)", -5.0, {})[0] is True
     allowed, note = decide_exit("basis_target_reached(current=0.0, target=0.001)", None, {})
-    assert allowed is True
-    assert note == "pnl_unavailable_allow"
+    assert allowed is False
+    assert note == "profit_pending(pnl_unavailable)"
 
 
 class TickerExchange:
@@ -149,6 +172,6 @@ def test_watchdog_closes_when_profit_floor_met():
 
     exited = watchdog.check_exit_conditions([_basis_position()], now_ms=1_700_000_000_000 + 1_000)
 
-    assert len(exited) == 1
-    assert len(calls) == 1
-    assert store.closed_trades and store.closed_trades[0][1].startswith("AUTO_EXIT:basis_target")
+    assert exited == []
+    assert calls == []
+    assert store.closed_trades == []

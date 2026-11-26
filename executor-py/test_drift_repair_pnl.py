@@ -102,7 +102,7 @@ def test_reconcile_flattens_single_leg_and_records_realized_pnl():
     trade = store.closed_trades[0]
     assert trade["close_reason"] == "drift_single_leg_auto_repair"
     assert trade["realized_pnl_usdt"] == pytest.approx(0.05 * (99.0 - 100.0) * -1)
-    assert trade["pnl_status"] in ("complete", "partial", "unavailable")
+    assert trade["pnl_status"] in ("complete", "partial", "unavailable", "fee_unavailable", "funding_unavailable")
 
 
 def test_reconcile_closes_stale_flat_position_without_orders():

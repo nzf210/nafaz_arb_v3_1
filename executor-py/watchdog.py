@@ -60,6 +60,7 @@ class RiskWatchdog(ReconcileMixin):
         self._position_alerts: Dict[str, tuple[str, int]] = {}
         self._unwind_attempts: Dict[str, tuple[int, int]] = {}
         self._margin_status: Dict[str, str] = {}
+        self._funding_flip_confirmations: Dict[str, tuple[int, int]] = {}
 
     def _load_exit_profile_settings(self) -> Dict[str, Dict[str, Any]]:
         settings = {key: dict(value) for key, value in DEFAULT_PROFILE_EXIT_SETTINGS.items()}
@@ -78,6 +79,8 @@ class RiskWatchdog(ReconcileMixin):
                 "basis_adverse_stop_spread",
                 "min_profit_usdt",
                 "max_loss_usdt",
+                "funding_flip_confirm_samples",
+                "funding_flip_confirm_window_ms",
             ):
                 if profile.get(key) is not None:
                     resolved[key] = float(profile[key])
@@ -300,10 +303,37 @@ class RiskWatchdog(ReconcileMixin):
         return evaluate_position_exit(pos, now_ms, settings, self.exchanges)
 
     def _estimate_exit_pnl(self, pos: Dict[str, Any]) -> Optional[float]:
-        marks, issue = fetch_leg_marks(pos, self.exchanges)
-        if issue or marks is None:
-            return None
-        return estimate_price_pnl(pos, marks)
+        # Gross mark PnL is not net-PnL and cannot authorize a profit exit.
+        # Only risk exits may proceed while fee/funding data is unavailable.
+        return None
+
+    def _confirm_funding_flip(
+        self, pos: Dict[str, Any], settings: Dict[str, Any], curr_ms: int
+    ) -> bool:
+        base_asset = str(pos.get("base_asset", "UNKNOWN"))
+        try:
+            required = max(1, int(float(settings.get("funding_flip_confirm_samples", 3))))
+            window_ms = max(0, int(float(settings.get("funding_flip_confirm_window_ms", 300_000))))
+        except (TypeError, ValueError, OverflowError):
+            required, window_ms = 3, 300_000
+        previous = self._funding_flip_confirmations.get(base_asset)
+        if previous is None or curr_ms - previous[1] > window_ms:
+            count = 1
+        else:
+            count = previous[0] + 1
+        self._funding_flip_confirmations[base_asset] = (count, curr_ms)
+        if count >= required:
+            self._funding_flip_confirmations.pop(base_asset, None)
+            return True
+        self._record_risk(
+            "FUNDING_FLIP_PENDING_CONFIRMATION",
+            "INFO",
+            {"base_asset": base_asset, "confirmed_samples": count, "required_samples": required},
+        )
+        return False
+
+    def _reset_funding_confirmation(self, pos: Dict[str, Any]) -> None:
+        self._funding_flip_confirmations.pop(str(pos.get("base_asset", "UNKNOWN")), None)
 
     def _report_exit_blocked(self, pos: Dict[str, Any], reason: str, note: str, now_ms: int) -> None:
         base_asset = str(pos.get("base_asset", "UNKNOWN"))
@@ -350,8 +380,15 @@ class RiskWatchdog(ReconcileMixin):
             reason, issues = self._should_exit_position(pos, curr_ms, settings)
             self._report_exit_data_issues(pos, issues, curr_ms)
             if not reason:
+                self._reset_funding_confirmation(pos)
                 continue
-            pnl_estimate = self._estimate_exit_pnl(pos)
+            if reason.startswith("funding_flipped") and not self._confirm_funding_flip(pos, settings, curr_ms):
+                self._report_exit_blocked(pos, reason, "funding flip awaiting confirmation", curr_ms)
+                continue
+            if reason.startswith(("basis_target_reached", "basis_target_already_reached")):
+                pnl_estimate = None
+            else:
+                pnl_estimate = self._estimate_exit_pnl(pos)
             allowed, note = decide_exit(reason, pnl_estimate, settings)
             if not allowed:
                 self._report_exit_blocked(pos, reason, note, curr_ms)

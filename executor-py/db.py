@@ -60,16 +60,22 @@ class PostgresStore:
             cur.execute(
                 "SELECT profile_id, enabled, dry_run, canary_max_notional_usdt, max_notional_usdt, "
                 "target_hold_days, basis_target_spread, basis_adverse_stop_spread, "
-                "min_profit_usdt, max_loss_usdt, allow_loss_on_hold FROM runtime_settings"
+                "min_profit_usdt, max_loss_usdt, allow_loss_on_hold, "
+                "funding_flip_confirm_samples, funding_flip_confirm_window_ms "
+                "FROM runtime_settings"
             )
             rows = cur.fetchall()
         profiles: Dict[str, Dict[str, Any]] = {}
         for row in rows:
+            values = list(row)
+            if len(values) < 13:
+                values.extend([None] * (13 - len(values)))
             (
                 pid, enabled, dry_run, canary_cap, max_notional, target_hold_days,
                 basis_target_spread, basis_adverse_stop_spread,
                 min_profit_usdt, max_loss_usdt, allow_loss_on_hold,
-            ) = row
+                funding_flip_confirm_samples, funding_flip_confirm_window_ms,
+            ) = values
             profiles[str(pid)] = {
                 "enabled": bool(enabled),
                 "dry_run": bool(dry_run),
@@ -84,6 +90,12 @@ class PostgresStore:
                 "max_loss_usdt": float(max_loss_usdt) if max_loss_usdt is not None else None,
                 "allow_loss_on_hold": (
                     bool(allow_loss_on_hold) if allow_loss_on_hold is not None else None
+                ),
+                "funding_flip_confirm_samples": (
+                    int(funding_flip_confirm_samples) if funding_flip_confirm_samples is not None else 3
+                ),
+                "funding_flip_confirm_window_ms": (
+                    int(funding_flip_confirm_window_ms) if funding_flip_confirm_window_ms is not None else 300000
                 ),
             }
         return profiles
@@ -380,7 +392,7 @@ class PostgresStore:
                     float(leg_a.get("qty", 0.0) or 0.0),
                     float(leg_b.get("qty", 0.0) or 0.0),
                     pnl.get("realized_pnl_usdt"),
-                    float(pnl.get("fees_usdt") or 0.0),
+                    pnl.get("fees_usdt"),
                     pnl.get("net_pnl_usdt"),
                     str(pnl.get("pnl_status") or "unavailable"),
                     close_reason,
@@ -435,7 +447,7 @@ class PostgresStore:
             cur.execute(
                 """
                 SELECT COUNT(*), COUNT(realized_pnl_usdt),
-                       COALESCE(SUM(realized_pnl_usdt), 0), COALESCE(SUM(fees_usdt), 0),
+                       COALESCE(SUM(realized_pnl_usdt), 0),                        COALESCE(SUM(fees_usdt), 0),
                        COALESCE(SUM(CASE WHEN realized_pnl_usdt > 0 THEN 1 ELSE 0 END), 0),
                        COALESCE(SUM(CASE WHEN realized_pnl_usdt < 0 THEN 1 ELSE 0 END), 0),
                        COALESCE(SUM(CASE WHEN closed_at >= NOW() - INTERVAL '24 hours'
