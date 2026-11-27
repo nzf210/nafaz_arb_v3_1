@@ -1,6 +1,7 @@
 """Tests for max leg drawdown risk safety and max open positions limits."""
 
 import json
+import time
 import pytest
 from unittest.mock import MagicMock
 
@@ -160,3 +161,31 @@ def test_telegram_set_max_positions_and_drawdown():
     th.dispatch_command(bot, -1001234567890, 111222, "/settings")
     assert any("Max Open Positions:" in msg and "5 pasang" in msg for msg in bot.outbox)
     assert any("Max Leg Drawdown:" in msg and "45.0%" in msg for msg in bot.outbox)
+
+
+def test_watchdog_populates_pnl_estimates_without_exit_reason():
+    """Verify that watchdog updates _latest_pnl_estimates on every cycle even when position is healthy."""
+    from watchdog import RiskWatchdog
+    redis_mock = MagicMock()
+    redis_mock.get.return_value = None
+    exchanges = {
+        "okx": MagicMock(fetch_ticker=MagicMock(return_value={"last": 100.0, "mark": 100.0})),
+        "mexc": MagicMock(fetch_ticker=MagicMock(return_value={"last": 100.0, "mark": 100.0})),
+    }
+    wd = RiskWatchdog(redis_client=redis_mock, exchanges=exchanges, dry_run=False)
+    pos = {
+        "base_asset": "TEST",
+        "profile_id": "funding_carry_core",
+        "qty": 1.0,
+        "opened_at_ms": int(time.time() * 1000) - 3600_000,  # 1 hour ago (not expired)
+        "leg_a": {"exchange": "okx", "symbol": "TEST/USDT:USDT", "side": "buy", "price": 100.0, "interval_hours": 8},
+        "leg_b": {"exchange": "mexc", "symbol": "TEST/USDT:USDT", "side": "sell", "price": 100.0, "interval_hours": 8},
+    }
+    # check_exit_conditions with no exit triggered
+    exited = wd.check_exit_conditions(positions=[pos])
+    assert exited == []
+    # But _latest_pnl_estimates MUST be populated for Telegram /positions to display!
+    assert "TEST" in wd._latest_pnl_estimates
+    assert "pnl" in wd._latest_pnl_estimates["TEST"]
+    assert wd._latest_pnl_estimates["TEST"]["pnl"]["gross_pnl_usdt"] == pytest.approx(0.0)
+

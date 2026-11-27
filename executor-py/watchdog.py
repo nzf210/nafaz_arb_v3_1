@@ -391,6 +391,7 @@ class RiskWatchdog(ReconcileMixin):
             settings = dict(profile_settings.get(pos.get("profile_id"), {"target_hold_days": 3.0}))
             if max_hold_days is not None:
                 settings["target_hold_days"] = max_hold_days
+            pnl_estimate = self._estimate_exit_pnl(pos, curr_ms)
             reason, issues = self._should_exit_position(pos, curr_ms, settings)
             self._report_exit_data_issues(pos, issues, curr_ms)
             if not reason:
@@ -401,7 +402,6 @@ class RiskWatchdog(ReconcileMixin):
             if reason.startswith("funding_flipped") and not self._confirm_funding_flip(pos, settings, curr_ms):
                 self._report_exit_blocked(pos, reason, "funding flip awaiting confirmation", curr_ms)
                 continue
-            pnl_estimate = self._estimate_exit_pnl(pos, curr_ms)
             allowed, note = decide_exit(reason, pnl_estimate, settings)
             if not allowed:
                 self._report_exit_blocked(pos, reason, note, curr_ms)
