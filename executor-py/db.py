@@ -30,6 +30,8 @@ class PostgresStore:
         self,
         dry_run: Optional[bool] = None,
         canary_max_notional_usdt: Optional[float] = None,
+        max_open_positions: Optional[int] = None,
+        max_leg_drawdown_pct: Optional[float] = None,
     ) -> None:
         conn = self._get_conn()
         if conn is None:
@@ -42,6 +44,60 @@ class PostgresStore:
                     "UPDATE runtime_settings SET canary_max_notional_usdt = %s, updated_at = NOW()",
                     (float(canary_max_notional_usdt),),
                 )
+            if max_open_positions is not None:
+                cur.execute(
+                    "UPDATE runtime_settings SET max_open_positions = %s, updated_at = NOW()",
+                    (int(max_open_positions),),
+                )
+            if max_leg_drawdown_pct is not None:
+                cur.execute(
+                    "UPDATE runtime_settings SET max_leg_drawdown_pct = %s, updated_at = NOW()",
+                    (float(max_leg_drawdown_pct),),
+                )
+
+    def update_runtime_setting(
+        self, setting_name: str, value: Any, profile_id: Optional[str] = None
+    ) -> bool:
+        allowed = {
+            "dry_run",
+            "canary_max_notional_usdt",
+            "max_notional_usdt",
+            "max_open_positions",
+            "max_leg_drawdown_pct",
+            "min_profit_usdt",
+            "max_loss_usdt",
+            "allow_loss_on_hold",
+        }
+        if setting_name not in allowed:
+            return False
+        conn = self._get_conn()
+        if conn is None:
+            return False
+        with conn.cursor() as cur:
+            if profile_id:
+                cur.execute(
+                    f"UPDATE runtime_settings SET {setting_name} = %s, updated_at = NOW() WHERE profile_id = %s",
+                    (value, profile_id),
+                )
+            else:
+                cur.execute(
+                    f"UPDATE runtime_settings SET {setting_name} = %s, updated_at = NOW()",
+                    (value,),
+                )
+        return True
+
+    def get_active_positions_count(self) -> int:
+        conn = self._get_conn()
+        if conn is None:
+            return 0
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM active_positions WHERE status = 'OPEN'")
+            if hasattr(cur, "fetchone"):
+                row = cur.fetchone()
+            else:
+                rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+                row = rows[0] if rows else None
+            return int(row[0]) if row and len(row) > 0 and row[0] is not None else 0
 
     def ensure_schema(self, schema_sql_path: str = "configs/init.sql") -> None:
         conn = self._get_conn()
@@ -61,20 +117,22 @@ class PostgresStore:
                 "SELECT profile_id, enabled, dry_run, canary_max_notional_usdt, max_notional_usdt, "
                 "target_hold_days, basis_target_spread, basis_adverse_stop_spread, "
                 "min_profit_usdt, max_loss_usdt, allow_loss_on_hold, "
-                "funding_flip_confirm_samples, funding_flip_confirm_window_ms "
+                "funding_flip_confirm_samples, funding_flip_confirm_window_ms, "
+                "max_leg_drawdown_pct, max_open_positions "
                 "FROM runtime_settings"
             )
             rows = cur.fetchall()
         profiles: Dict[str, Dict[str, Any]] = {}
         for row in rows:
             values = list(row)
-            if len(values) < 13:
-                values.extend([None] * (13 - len(values)))
+            if len(values) < 15:
+                values.extend([None] * (15 - len(values)))
             (
                 pid, enabled, dry_run, canary_cap, max_notional, target_hold_days,
                 basis_target_spread, basis_adverse_stop_spread,
                 min_profit_usdt, max_loss_usdt, allow_loss_on_hold,
                 funding_flip_confirm_samples, funding_flip_confirm_window_ms,
+                max_leg_drawdown_pct, max_open_positions,
             ) = values
             profiles[str(pid)] = {
                 "enabled": bool(enabled),
@@ -96,6 +154,12 @@ class PostgresStore:
                 ),
                 "funding_flip_confirm_window_ms": (
                     int(funding_flip_confirm_window_ms) if funding_flip_confirm_window_ms is not None else 300000
+                ),
+                "max_leg_drawdown_pct": (
+                    float(max_leg_drawdown_pct) if max_leg_drawdown_pct is not None else 0.60
+                ),
+                "max_open_positions": (
+                    int(max_open_positions) if max_open_positions is not None else 3
                 ),
             }
         return profiles

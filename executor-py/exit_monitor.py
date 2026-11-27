@@ -16,12 +16,27 @@ def _symbol(leg: Dict[str, Any]) -> str:
     return str(leg.get("symbol") or leg.get("canon_symbol") or leg.get("raw_symbol") or "")
 
 
+def parse_interval_hours(val: Any, default: int = 8) -> int:
+    """Parse interval string or number into integer hours (e.g., '4h' -> 4, '8' -> 8)."""
+    if val is None:
+        return default
+    if isinstance(val, (int, float)):
+        return max(1, int(val))
+    s = str(val).strip().lower()
+    if s.endswith("h"):
+        s = s[:-1]
+    try:
+        return max(1, int(float(s)))
+    except (ValueError, TypeError):
+        return default
+
+
 def fetch_leg_funding_24h(leg: Dict[str, Any], exchanges: Dict[str, Any]) -> Optional[float]:
     symbol = _symbol(leg)
     if PERP_SUFFIX not in symbol:
         return 0.0
     try:
-        interval_hours = max(int(leg.get("interval_hours") or 8), 1)
+        interval_hours = max(parse_interval_hours(leg.get("interval_hours"), 8), 1)
     except (TypeError, ValueError, OverflowError):
         return None
     if leg.get("current_funding_rate") is not None:
@@ -37,7 +52,9 @@ def fetch_leg_funding_24h(leg: Dict[str, Any], exchanges: Dict[str, Any]) -> Opt
         rate = client.fetch_funding_rate(symbol)
         if not isinstance(rate, dict) or rate.get("fundingRate") is None:
             return None
-        live_interval = int(rate.get("intervalHours") or interval_hours)
+        live_interval = parse_interval_hours(
+            rate.get("interval") or rate.get("intervalHours"), interval_hours
+        )
         return float(rate["fundingRate"]) * (24.0 / max(live_interval, 1))
     except Exception as exc:
         logger.warning("Failed to fetch funding rate for %s on %s: %s", symbol, exchange, exc)
@@ -150,16 +167,70 @@ def _funding_exit(
     return None, None
 
 
+def _leg_drawdown_exit(
+    position: Dict[str, Any], settings: Dict[str, Any], exchanges: Dict[str, Any]
+) -> tuple[Optional[str], Optional[str]]:
+    """Exit when a single leg experiences extreme drawdown, protecting exchange collateral."""
+    try:
+        max_dd = float(settings.get("max_leg_drawdown_pct", 0.60))
+    except (TypeError, ValueError, OverflowError):
+        max_dd = 0.60
+    if not math.isfinite(max_dd) or max_dd <= 0:
+        return None, None
+
+    prices, issue = fetch_leg_marks(position, exchanges)
+    if issue or prices is None:
+        return None, issue
+
+    for leg_key in ("leg_a", "leg_b"):
+        leg = position.get(leg_key, {})
+        try:
+            entry_price = float(
+                leg.get("price") or leg.get("entry_price") or leg.get("vwap_price") or 0.0
+            )
+        except (TypeError, ValueError):
+            entry_price = 0.0
+        if entry_price <= 0:
+            continue
+        mark_price = prices.get(leg_key)
+        if mark_price is None or mark_price <= 0:
+            continue
+        side = str(leg.get("side") or leg.get("action") or "").lower()
+        if side in ("buy", "long"):
+            drawdown = (entry_price - mark_price) / entry_price
+        elif side in ("sell", "short"):
+            drawdown = (mark_price - entry_price) / entry_price
+        else:
+            continue
+
+        if drawdown >= max_dd:
+            symbol = _symbol(leg)
+            exchange = leg.get("exchange", "")
+            return (
+                f"leg_drawdown_exceeded({leg_key}:{exchange}_{symbol},dd={drawdown*100:.1f}%,limit={max_dd*100:.1f}%)",
+                None,
+            )
+
+    return None, None
+
+
 def evaluate_position_exit(
     position: Dict[str, Any],
     now_ms: int,
     settings: Dict[str, Any],
     exchanges: Dict[str, Any],
 ) -> tuple[Optional[str], List[str]]:
-    reason, issue = _hold_exit(position, now_ms, settings)
+    reason, issue = _leg_drawdown_exit(position, settings, exchanges)
     if reason:
         return reason, []
     issues = [issue] if issue else []
+
+    reason, issue = _hold_exit(position, now_ms, settings)
+    if reason:
+        return reason, []
+    if issue:
+        issues.append(issue)
+
     if position.get("profile_id") == BASIS_PROFILE_ID:
         reason, issue = _basis_exit(position, settings, exchanges)
         if issue:

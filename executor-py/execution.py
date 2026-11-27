@@ -307,14 +307,39 @@ class DeltaNeutralExecutor(UnwindMixin):
         status = "FILLED_1TO1" if filled_a == qty else "PARTIAL_FILLED_1TO1"
         average_a = resolve_fill_price(self.exchanges.get(leg_a["exchange"]), sym_a, order_a)
         average_b = resolve_fill_price(self.exchanges.get(leg_b["exchange"]), sym_b, order_b) if order_b else None
+
+        fee_a = order_fee_usdt(order_a)
+        if fee_a is None and hasattr(client_a, "fetch_my_trades"):
+            try:
+                order_id_a = order_a.get("id")
+                since_a = order_a.get("timestamp") or (int(time.time() * 1000) - 15_000)
+                trades_a = client_a.fetch_my_trades(sym_a, since=since_a)
+                match_trades = [t for t in trades_a if str(t.get("order")) == str(order_id_a)] if order_id_a else trades_a
+                if match_trades:
+                    fee_a = sum(float(t["fee"]["cost"]) for t in match_trades if isinstance(t.get("fee"), dict) and t["fee"].get("cost") is not None)
+            except Exception as exc:
+                logger.debug("Failed to backfill entry fee for leg_a: %s", exc)
+
+        fee_b = order_fee_usdt(order_b)
+        if fee_b is None and hasattr(client_b, "fetch_my_trades"):
+            try:
+                order_id_b = order_b.get("id") if order_b else None
+                since_b = (order_b.get("timestamp") if order_b else None) or (int(time.time() * 1000) - 15_000)
+                trades_b = client_b.fetch_my_trades(sym_b, since=since_b)
+                match_trades = [t for t in trades_b if str(t.get("order")) == str(order_id_b)] if order_id_b else trades_b
+                if match_trades:
+                    fee_b = sum(float(t["fee"]["cost"]) for t in match_trades if isinstance(t.get("fee"), dict) and t["fee"].get("cost") is not None)
+            except Exception as exc:
+                logger.debug("Failed to backfill entry fee for leg_b: %s", exc)
+
         if self.notifier:
             self.notifier(f"[EXEC] {status} {signal['base_asset']} qty={filled_a}")
         return {
             "status": status, "signal_id": signal["signal_id"], "base_asset": signal["base_asset"],
             "qty": filled_a, "qty_requested": qty, "qty_filled_a": filled_a, "qty_filled_b": filled_b,
             "price_a": price_a, "price_b": price_b,
-            "leg_a": {"exchange": leg_a["exchange"], "symbol": sym_a, "side": side_a, "price": price_a, "entry_avg_price": average_a, "qty": filled_a, "entry_fee_usdt": order_fee_usdt(order_a)},
-            "leg_b": {"exchange": leg_b["exchange"], "symbol": sym_b, "side": side_b, "price": price_b, "entry_avg_price": average_b, "qty": filled_b, "entry_fee_usdt": order_fee_usdt(order_b)},
+            "leg_a": {"exchange": leg_a["exchange"], "symbol": sym_a, "side": side_a, "price": price_a, "entry_avg_price": average_a, "qty": filled_a, "entry_fee_usdt": fee_a},
+            "leg_b": {"exchange": leg_b["exchange"], "symbol": sym_b, "side": side_b, "price": price_b, "entry_avg_price": average_b, "qty": filled_b, "entry_fee_usdt": fee_b},
             "cancelled_unfilled_a": cancelled_unfilled_a, "order_a": order_a, "order_b": order_b,
         }
 

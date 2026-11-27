@@ -133,13 +133,18 @@ ALTER TABLE runtime_settings ADD COLUMN IF NOT EXISTS allow_loss_on_hold BOOLEAN
 ALTER TABLE runtime_settings ADD COLUMN IF NOT EXISTS funding_flip_confirm_samples INTEGER;
 ALTER TABLE runtime_settings ADD COLUMN IF NOT EXISTS funding_flip_confirm_window_ms BIGINT;
 ALTER TABLE runtime_settings ADD COLUMN IF NOT EXISTS emergency_max_hold_days DOUBLE PRECISION;
+ALTER TABLE runtime_settings ADD COLUMN IF NOT EXISTS max_leg_drawdown_pct DOUBLE PRECISION;
+ALTER TABLE runtime_settings ADD COLUMN IF NOT EXISTS max_open_positions INTEGER;
 
 UPDATE runtime_settings
 SET min_profit_usdt = COALESCE(min_profit_usdt, 0.0),
     max_loss_usdt = COALESCE(max_loss_usdt, 0.05),
     allow_loss_on_hold = COALESCE(allow_loss_on_hold, FALSE),
-    emergency_max_hold_days = COALESCE(emergency_max_hold_days, 14.0);
+    emergency_max_hold_days = COALESCE(emergency_max_hold_days, 14.0),
+    max_leg_drawdown_pct = COALESCE(max_leg_drawdown_pct, 0.60),
+    max_open_positions = COALESCE(max_open_positions, 3);
 UPDATE runtime_settings
 SET funding_flip_confirm_samples = COALESCE(funding_flip_confirm_samples, 3),
     funding_flip_confirm_window_ms = COALESCE(funding_flip_confirm_window_ms, 300000);
+
 

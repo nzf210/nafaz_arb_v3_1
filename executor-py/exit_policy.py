@@ -6,6 +6,7 @@ DEFAULT_EXIT_POLICY: Dict[str, Any] = {
     "min_profit_usdt": 0.0,
     "max_loss_usdt": None,
     "allow_loss_on_hold": False,
+    "max_leg_drawdown_pct": 0.60,
 }
 
 PROFIT_REASONS = ("basis_target_reached", "basis_target_already_reached")
@@ -22,6 +23,8 @@ def resolve_policy(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     max_loss = resolved["max_loss_usdt"]
     resolved["max_loss_usdt"] = abs(float(max_loss)) if max_loss is not None else None
     resolved["allow_loss_on_hold"] = bool(resolved["allow_loss_on_hold"])
+    max_dd = resolved.get("max_leg_drawdown_pct")
+    resolved["max_leg_drawdown_pct"] = float(max_dd) if max_dd is not None else 0.60
     return resolved
 
 
@@ -37,9 +40,11 @@ def decide_exit(reason: str, pnl_usdt: Optional[float], settings: Optional[Dict[
       (breakeven at exactly the floor still waits).
     - Funding flip / max hold may close at a loss only when the configured loss cap is
       breached, allow_loss_on_hold is enabled, or the trade is already profitable.
-    - Risk triggers (adverse basis stop, ADL, drift repair, stale close) always execute.
+    - Risk triggers (adverse basis stop, ADL, leg drawdown, drift repair, stale close) always execute.
     - Unknown PnL never traps the position open: risk management wins over stale quotes.
     """
+    if reason.startswith("leg_drawdown_exceeded"):
+        return True, "risk_exit(leg_drawdown)"
     policy = resolve_policy(settings)
     min_profit = policy["min_profit_usdt"]
     if pnl_usdt is None:

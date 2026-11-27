@@ -36,6 +36,8 @@ class TelegramBot:
         watchdog: Optional[Any] = None,
         exchanges: Optional[Dict[str, Any]] = None,
         canary_cap: float = 20.0,
+        max_open_positions: int = 3,
+        max_leg_drawdown_pct: float = 0.60,
         send_enabled: bool = True,
     ):
         self.bot_token = bot_token or os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -50,6 +52,8 @@ class TelegramBot:
         self.watchdog = watchdog
         self.exchanges = exchanges or {}
         self.canary_cap = canary_cap
+        self.max_open_positions = max_open_positions
+        self.max_leg_drawdown_pct = max_leg_drawdown_pct
         self.consumer: Optional[Any] = None
         self.send_enabled = send_enabled
 
@@ -450,6 +454,33 @@ class TelegramBot:
             if self.db_store:
                 self.db_store.sync_env_overrides(dry_run=val)
             return True, f"Dry-run global diubah menjadi <b>{val}</b>."
+        if param in ("max_positions", "max_open_positions", "positions"):
+            try:
+                count = int(val_str)
+                if count <= 0:
+                    return False, "Batas posisi harus lebih besar dari 0."
+                self.max_open_positions = count
+                if self.consumer:
+                    self.consumer.max_open_positions = count
+                if self.db_store:
+                    self.db_store.sync_env_overrides(max_open_positions=count)
+                return True, f"Batas total posisi aktif diubah menjadi <b>{count} pasang</b>."
+            except ValueError:
+                return False, "Nilai max positions harus berupa angka bulat (cth: 3 atau 5)."
+        if param in ("max_drawdown", "max_leg_drawdown", "drawdown"):
+            try:
+                clean = val_str.strip().rstrip("%")
+                pct = float(clean)
+                if pct > 1.0:
+                    pct = pct / 100.0
+                if not (0.01 <= pct <= 0.99):
+                    return False, "Nilai max drawdown harus antara 1% (0.01) dan 99% (0.99)."
+                self.max_leg_drawdown_pct = pct
+                if self.db_store:
+                    self.db_store.sync_env_overrides(max_leg_drawdown_pct=pct)
+                return True, f"Batas max leg drawdown diubah menjadi <b>{pct*100:.1f}%</b>."
+            except ValueError:
+                return False, "Nilai max drawdown harus angka (cth: 60 atau 0.6)."
         return False, f"Parameter '<code>{param}</code>' tidak didukung."
 
     def force_close_position(self, base_asset: str) -> Dict[str, Any]:

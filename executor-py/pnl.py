@@ -272,9 +272,53 @@ def estimate_price_pnl(position: Dict[str, Any], prices: Dict[str, float]) -> Op
     return total if priced == 2 else None
 
 
+def parse_interval_hours(val: Any, default: int = 8) -> int:
+    """Parse interval string or number into integer hours (e.g., '4h' -> 4, '8' -> 8)."""
+    if val is None:
+        return default
+    if isinstance(val, (int, float)):
+        return max(1, int(val))
+    s = str(val).strip().lower()
+    if s.endswith("h"):
+        s = s[:-1]
+    try:
+        return max(1, int(float(s)))
+    except (ValueError, TypeError):
+        return default
+
+
+_FUNDING_HISTORY_CACHE: Dict[str, tuple[float, float]] = {}
+FUNDING_CACHE_TTL_MS = 300_000
+
+
+def get_real_leg_funding(
+    exchange_client: Any, ex_name: str, symbol: str, opened_at_ms: int, curr_ms: int
+) -> Optional[float]:
+    """Fetch real funding settlement total from exchange history, with in-memory caching."""
+    if not exchange_client or not hasattr(exchange_client, "fetch_funding_history"):
+        return None
+    cache_key = f"{ex_name}:{symbol}:{opened_at_ms}"
+    cached = _FUNDING_HISTORY_CACHE.get(cache_key)
+    if cached is not None and (curr_ms - cached[1]) < FUNDING_CACHE_TTL_MS:
+        return cached[0]
+
+    try:
+        history = exchange_client.fetch_funding_history(symbol, since=opened_at_ms)
+        if isinstance(history, list):
+            total = 0.0
+            for item in history:
+                if isinstance(item, dict) and item.get("amount") is not None:
+                    total += float(item["amount"])
+            _FUNDING_HISTORY_CACHE[cache_key] = (total, curr_ms)
+            return total
+    except Exception as exc:
+        logger.debug("fetch_funding_history failed for %s on %s: %s", symbol, ex_name, exc)
+    return None
+
+
 DEFAULT_TAKER_FEE_RATES = {
     "okx": 0.0005,
-    "mexc": 0.0002,
+    "mexc": 0.0008,
     "bybit": 0.00055,
     "default": 0.0006,
 }
@@ -376,36 +420,48 @@ def estimate_net_exit_pnl(
 
         leg_funding = 0.0
         if not has_recorded_funding and ":USDT" in symbol:
-            try:
-                interval_hours = max(int(leg.get("interval_hours") or 8), 1)
-            except (TypeError, ValueError, OverflowError):
-                interval_hours = 8
-
-            funding_rate = None
-            if leg.get("current_funding_rate") is not None:
-                try:
-                    funding_rate = float(leg["current_funding_rate"])
-                except (TypeError, ValueError):
-                    pass
-            if funding_rate is None and exchanges and ex_name in exchanges:
+            real_funding = None
+            if exchanges and ex_name in exchanges and opened_ms > 0:
                 client = exchanges[ex_name]
-                if hasattr(client, "fetch_funding_rate"):
-                    try:
-                        fr_res = client.fetch_funding_rate(symbol)
-                        if isinstance(fr_res, dict) and fr_res.get("fundingRate") is not None:
-                            funding_rate = float(fr_res["fundingRate"])
-                    except Exception as exc:
-                        logger.debug("Failed to fetch funding rate for %s: %s", symbol, exc)
+                real_funding = get_real_leg_funding(client, ex_name, symbol, opened_ms, curr_ms)
 
-            settlement_ms = interval_hours * 3600_000
-            settlements = int(elapsed_ms // settlement_ms)
-            if settlements == 0:
-                leg_funding = 0.0
-            elif funding_rate is not None:
-                cash_dir = -1.0 if direction == 1.0 else 1.0
-                leg_funding = mark_price * qty * funding_rate * cash_dir * max(settlements, 0)
+            if real_funding is not None:
+                leg_funding = real_funding
             else:
-                all_funding_available = False
+                try:
+                    interval_hours = max(parse_interval_hours(leg.get("interval_hours"), 8), 1)
+                except (TypeError, ValueError, OverflowError):
+                    interval_hours = 8
+
+                funding_rate = None
+                if leg.get("current_funding_rate") is not None:
+                    try:
+                        funding_rate = float(leg["current_funding_rate"])
+                    except (TypeError, ValueError):
+                        pass
+                if funding_rate is None and exchanges and ex_name in exchanges:
+                    client = exchanges[ex_name]
+                    if hasattr(client, "fetch_funding_rate"):
+                        try:
+                            fr_res = client.fetch_funding_rate(symbol)
+                            if isinstance(fr_res, dict):
+                                if fr_res.get("fundingRate") is not None:
+                                    funding_rate = float(fr_res["fundingRate"])
+                                live_int = fr_res.get("interval") or fr_res.get("intervalHours")
+                                if live_int:
+                                    interval_hours = max(parse_interval_hours(live_int, interval_hours), 1)
+                        except Exception as exc:
+                            logger.debug("Failed to fetch funding rate for %s: %s", symbol, exc)
+
+                settlement_ms = interval_hours * 3600_000
+                settlements = int(elapsed_ms // settlement_ms)
+                if settlements == 0:
+                    leg_funding = 0.0
+                elif funding_rate is not None:
+                    cash_dir = -1.0 if direction == 1.0 else 1.0
+                    leg_funding = mark_price * qty * funding_rate * cash_dir * max(settlements, 0)
+                else:
+                    all_funding_available = False
             funding_total += leg_funding
 
         legs_summary[leg_key] = {

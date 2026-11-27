@@ -128,6 +128,8 @@ def main(argv: Optional[list[str]] = None) -> None:
     db_url = os.getenv("DATABASE_URL", "")
     dry_run = _env_bool("DRY_RUN", True)
     canary_cap = _env_float("CANARY_MAX_NOTIONAL_USDT", 20.0)
+    max_open_positions = int(os.getenv("MAX_OPEN_POSITIONS", "3"))
+    max_leg_drawdown_pct = _env_float("MAX_LEG_DRAWDOWN_PCT", 0.60)
     watchdog_interval_sec = float(os.getenv("WATCHDOG_INTERVAL_SEC", "15"))
 
     redis_client = redis.Redis.from_url(redis_url, decode_responses=True)
@@ -141,6 +143,8 @@ def main(argv: Optional[list[str]] = None) -> None:
         db_store.sync_env_overrides(
             dry_run=_env_bool_optional("DRY_RUN"),
             canary_max_notional_usdt=_env_float("CANARY_MAX_NOTIONAL_USDT"),
+            max_open_positions=int(os.getenv("MAX_OPEN_POSITIONS")) if os.getenv("MAX_OPEN_POSITIONS") else None,
+            max_leg_drawdown_pct=_env_float("MAX_LEG_DRAWDOWN_PCT"),
         )
 
     exchanges = {} if dry_run else build_ccxt_exchanges(load_markets=True)
@@ -150,6 +154,8 @@ def main(argv: Optional[list[str]] = None) -> None:
         db_store=db_store,
         exchanges=exchanges,
         canary_cap=canary_cap or 20.0,
+        max_open_positions=max_open_positions,
+        max_leg_drawdown_pct=max_leg_drawdown_pct or 0.60,
     )
     executor = DeltaNeutralExecutor(exchanges=exchanges, notifier=tg_bot.send)
     consumer = SignalConsumer(
@@ -157,6 +163,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         executor=executor,
         default_dry_run=dry_run,
         canary_max_notional_usdt=canary_cap,
+        max_open_positions=max_open_positions,
         db_store=db_store,
         notifier=tg_bot,
     )

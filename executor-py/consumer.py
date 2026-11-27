@@ -59,6 +59,7 @@ class SignalConsumer:
         profiles: Optional[Dict[str, Dict[str, Any]]] = None,
         default_dry_run: bool = False,
         canary_max_notional_usdt: Optional[float] = None,
+        max_open_positions: int = 3,
         lock_ttl_sec: int = 10,
         clock_ms: Optional[Callable[[], int]] = None,
         db_store: Optional[Any] = None,
@@ -75,6 +76,7 @@ class SignalConsumer:
         }
         self.default_dry_run = default_dry_run
         self.canary_max_notional_usdt = canary_max_notional_usdt
+        self.max_open_positions = max_open_positions
         self.lock_ttl_sec = lock_ttl_sec
         self.clock_ms = clock_ms or (lambda: int(time.time() * 1000))
 
@@ -83,6 +85,13 @@ class SignalConsumer:
             db_profiles = self.db_store.load_profile_settings()
             if db_profiles:
                 self.profiles.update(db_profiles)
+                for cfg in db_profiles.values():
+                    if cfg.get("max_open_positions") is not None:
+                        try:
+                            self.max_open_positions = int(cfg["max_open_positions"])
+                            break
+                        except (ValueError, TypeError):
+                            pass
 
     def is_kill_switch_active(self) -> bool:
         val = self.redis.get("core:kill_switch")
@@ -151,6 +160,24 @@ class SignalConsumer:
             self._persist_outcome(signal, res, executed=False)
             return res
 
+        open_count = self.get_open_positions_count()
+        if open_count >= self.max_open_positions:
+            logger.info(
+                "Max open positions reached (%d/%d). Skipped: %s",
+                open_count,
+                self.max_open_positions,
+                signal_id,
+            )
+            res = {
+                "status": "REJECTED",
+                "reason": "max_positions_reached",
+                "open_positions": open_count,
+                "max_positions": self.max_open_positions,
+                "signal_id": signal_id,
+            }
+            self._persist_outcome(signal, res, executed=False)
+            return res
+
         base_asset = signal["base_asset"]
         if self._has_open_position(base_asset):
             logger.info("Position already OPEN for %s. Skipped: %s", base_asset, signal_id)
@@ -198,6 +225,20 @@ class SignalConsumer:
             except Exception:
                 pass
         return False
+
+    def get_open_positions_count(self) -> int:
+        raw = self.redis.get(REDIS_POSITIONS_KEY)
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        if raw:
+            try:
+                positions = json.loads(raw)
+                return sum(1 for p in positions if float(p.get("qty", 0.0)) > 0)
+            except Exception:
+                pass
+        if self.db_store is not None and hasattr(self.db_store, "get_active_positions_count"):
+            return self.db_store.get_active_positions_count()
+        return 0
 
     def _persist_outcome(self, signal: Dict[str, Any], result: Dict[str, Any], executed: bool) -> None:
         status = str(result.get("status", ""))

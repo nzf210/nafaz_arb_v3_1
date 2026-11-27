@@ -103,7 +103,13 @@ def handle_reconcile(bot: Any, chat_id: int, user_id: int, args: List[str]) -> N
 
 def handle_settings(bot: Any, chat_id: int, user_id: int, args: List[str]) -> None:
     profiles = bot.get_profiles()
-    bot.send_message(chat_id, tf.format_settings(profiles, bot.dry_run, bot.canary_cap), reply_markup=tf.settings_keyboard())
+    max_positions = getattr(bot, "max_open_positions", 3)
+    max_drawdown = getattr(bot, "max_leg_drawdown_pct", 0.60)
+    bot.send_message(
+        chat_id,
+        tf.format_settings(profiles, bot.dry_run, bot.canary_cap, max_positions, max_drawdown),
+        reply_markup=tf.settings_keyboard(),
+    )
 
 
 def handle_set(bot: Any, chat_id: int, user_id: int, args: List[str]) -> None:
@@ -111,7 +117,14 @@ def handle_set(bot: Any, chat_id: int, user_id: int, args: List[str]) -> None:
         bot.send_message(chat_id, DENIED_MSG)
         return
     if len(args) < 2:
-        bot.send_message(chat_id, "ℹ️ <i>Gunakan:</i> <code>/set &lt;param&gt; &lt;nilai&gt;</code>\nContoh: <code>/set canary 50</code> atau <code>/set dryrun false</code>")
+        bot.send_message(
+            chat_id,
+            "ℹ️ <i>Gunakan:</i> <code>/set &lt;param&gt; &lt;nilai&gt;</code>\nContoh:\n"
+            "• <code>/set canary 50</code>\n"
+            "• <code>/set dryrun false</code>\n"
+            "• <code>/set max_positions 3</code>\n"
+            "• <code>/set max_drawdown 60</code>",
+        )
         return
     param = args[0].lower()
     val_str = args[1]

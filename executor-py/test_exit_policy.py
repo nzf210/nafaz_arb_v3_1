@@ -207,9 +207,9 @@ def test_estimate_net_exit_pnl_calculation():
     assert pnl["data_status"] == "complete"
     assert pnl["gross_pnl_usdt"] == pytest.approx(2.0)
     assert pnl["entry_fees_usdt"] == pytest.approx(0.10)
-    assert pnl["exit_fees_usdt"] == pytest.approx(0.07)
+    assert pnl["exit_fees_usdt"] == pytest.approx(0.13)
     assert pnl["funding_usdt"] == pytest.approx(0.5)
-    assert pnl["net_pnl_usdt"] == pytest.approx(2.33)
+    assert pnl["net_pnl_usdt"] == pytest.approx(2.27)
 
 
 def test_estimate_net_exit_pnl_gross_profit_net_loss_gated():

@@ -464,11 +464,19 @@ def format_risk_status(risk_data: Dict[str, Any]) -> str:
     return "\n".join(lines).strip()
 
 
-def format_settings(profiles: Dict[str, Any], global_dry: bool, canary_cap: float) -> str:
+def format_settings(
+    profiles: Dict[str, Any],
+    global_dry: bool,
+    canary_cap: float,
+    max_open_positions: int = 3,
+    max_leg_drawdown_pct: float = 0.60,
+) -> str:
     lines = [
         "⚙️ <b>Pengaturan Runtime nafaz_arb v3.1</b>\n",
         f"• <b>Global Default Dry-Run:</b> <code>{global_dry}</code>",
-        f"• <b>Default Canary Cap:</b> <code>${canary_cap:.2f} {TEXT_USDT}</code>\n",
+        f"• <b>Default Canary Cap:</b> <code>${canary_cap:.2f} {TEXT_USDT}</code>",
+        f"• <b>Max Open Positions:</b> <code>{max_open_positions} pasang</code>",
+        f"• <b>Max Leg Drawdown:</b> <code>{max_leg_drawdown_pct * 100:.1f}%</code>\n",
         "<b>Profil Sinyal Aktif:</b>",
     ]
     for pid, p in profiles.items():
@@ -480,6 +488,8 @@ def format_settings(profiles: Dict[str, Any], global_dry: bool, canary_cap: floa
         "\n📝 <b>Ubah Parameter via Command:</b>\n"
         "• <code>/set canary &lt;usd&gt;</code> (cth: /set canary 50)\n"
         "• <code>/set dryrun &lt;true|false&gt;</code>\n"
+        "• <code>/set max_positions &lt;n&gt;</code> (cth: /set max_positions 3)\n"
+        "• <code>/set max_drawdown &lt;pct&gt;</code> (cth: /set max_drawdown 60)\n"
         "• <code>/set profile &lt;id&gt; enable|disable</code>"
     )
     return "\n".join(lines).strip()

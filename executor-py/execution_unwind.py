@@ -1,6 +1,7 @@
 """Per-leg close verification, flat-leg skipping, and realized PnL capture for unwind routes."""
 
 import logging
+import time
 from typing import Any, Dict, Optional
 
 from pnl import compute_realized_pnl, resolve_direction, resolve_fill_price
@@ -186,17 +187,27 @@ class UnwindMixin:
         order_b: Optional[Dict[str, Any]],
         position: Dict[str, Any],
     ) -> None:
-        """Backfill missing average prices from fetch_order/ticker before PnL is persisted."""
+        """Backfill missing average prices and fees from fetch_order/ticker/trades before PnL is persisted."""
         for order, leg_key in ((order_a, "leg_a"), (order_b, "leg_b")):
             if not isinstance(order, dict) or order.get("status") == "already_flat":
-                continue
-            if order.get("average") or order.get("price"):
                 continue
             leg = position.get(leg_key) or {}
             symbol = leg.get("symbol") or leg.get("canon_symbol") or leg.get("raw_symbol")
             client = self.exchanges.get(leg.get("exchange") or "")
-            price = resolve_fill_price(client, symbol or "", order)
-            if price:
-                order["average"] = price
+            if not order.get("average") and not order.get("price"):
+                price = resolve_fill_price(client, symbol or "", order)
+                if price:
+                    order["average"] = price
+            if order.get("fee") is None and client and hasattr(client, "fetch_my_trades") and symbol:
+                try:
+                    order_id = order.get("id")
+                    since = order.get("timestamp") or (int(time.time() * 1000) - 15_000)
+                    trades = client.fetch_my_trades(symbol, since=since)
+                    match_trades = [t for t in trades if str(t.get("order")) == str(order_id)] if order_id else trades
+                    if match_trades:
+                        total_fee = sum(float(t["fee"]["cost"]) for t in match_trades if isinstance(t.get("fee"), dict) and t["fee"].get("cost") is not None)
+                        order["fee"] = {"currency": "USDT", "cost": total_fee}
+                except Exception as exc:
+                    logger.debug("Failed to backfill exit fee for %s: %s", symbol, exc)
 
     close_route = unwind_route

@@ -160,6 +160,13 @@ class ReconcileMixin:
         self, position: Dict[str, Any], unwind_result: Dict[str, Any], close_reason: str
     ) -> bool:
         """Persist realized PnL, close the position row, and notify Telegram."""
+        if "funding_usdt" not in unwind_result:
+            base_asset = str(position.get("base_asset", "UNKNOWN"))
+            latest = getattr(self, "_latest_pnl_estimates", {}).get(base_asset, {})
+            pnl_est = latest.get("pnl") if isinstance(latest, dict) else None
+            if isinstance(pnl_est, dict) and pnl_est.get("funding_usdt") is not None:
+                unwind_result["funding_usdt"] = pnl_est["funding_usdt"]
+
         pnl = compute_realized_pnl(position, unwind_result)
         unwind_result.update(
             {
