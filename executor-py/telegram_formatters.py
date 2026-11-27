@@ -460,18 +460,26 @@ def format_position_closed_alert(unwind_result: Dict[str, Any], base_asset: str)
     status = unwind_result.get("status", "UNWOUND")
     asset = html.escape(base_asset).upper()
     pnl = unwind_result.get("realized_pnl_usdt")
-    pnl_line = (
-        f"• PnL harga (gross, belum termasuk fee/funding): <b>{float(pnl):+.4f} USDT</b>\n"
-        if pnl is not None
-        else "• PnL harga: tidak tersedia (average fill masuk/keluar tidak tercatat)\n"
-    )
+    net_pnl = unwind_result.get("realized_pnl_net_usdt")
+    fees = unwind_result.get("fees_usdt")
+    pnl_lines = []
+    if pnl is not None:
+        pnl_lines.append(f"• PnL harga (gross): <b>{float(pnl):+.4f} USDT</b>")
+    else:
+        pnl_lines.append("• PnL harga: tidak tersedia")
+    if net_pnl is not None:
+        pnl_lines.append(f"• Net PnL (setelah biaya): <b>{float(net_pnl):+.4f} USDT</b>")
+    if fees is not None:
+        pnl_lines.append(f"• Total Fee: <b>{float(fees):.4f} USDT</b>")
+    pnl_block = "\n".join(pnl_lines) + "\n"
     close_reason = html.escape(str(unwind_result.get("close_reason") or ""))
     return (
         f"🎉 <b>POSISI SELESAI DITUTUP!</b>\n\n"
         f"• Aset: <b>{asset}</b>\n"
         f"• Status Unwind: <code>{status}</code>\n"
         f"• Flat Verifikasi: <code>{unwind_result.get('verified_flat', True)}</code>\n"
-        f"{pnl_line}"
+        f"{pnl_block}"
         f"• Alasan: <code>{close_reason}</code>\n\n"
         "<i>Ketik /history untuk melihat riwayat eksekusi.</i>"
     )
+

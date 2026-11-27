@@ -3,6 +3,8 @@
 import pytest
 
 from exit_policy import decide_exit, resolve_policy
+from exit_monitor import _hold_exit
+from pnl import _convert_fee_to_usdt, estimate_net_exit_pnl, order_fee_usdt
 from watchdog import RiskWatchdog, TelegramNotifier
 
 
@@ -172,6 +174,129 @@ def test_watchdog_closes_when_profit_floor_met():
 
     exited = watchdog.check_exit_conditions([_basis_position()], now_ms=1_700_000_000_000 + 1_000)
 
-    assert exited == []
-    assert calls == []
-    assert store.closed_trades == []
+    assert len(exited) == 1
+    assert len(calls) == 1
+    assert store.closed_trades and store.closed_trades[0][1].startswith("AUTO_EXIT:basis_target")
+
+
+def test_estimate_net_exit_pnl_calculation():
+    position = {
+        "base_asset": "BTC",
+        "profile_id": "funding_carry_core",
+        "qty": 1.0,
+        "funding_usdt": 0.5,
+        "leg_a": {
+            "exchange": "okx",
+            "symbol": "BTC/USDT:USDT",
+            "side": "buy",
+            "price": 100.0,
+            "entry_fee": 0.05,
+            "entry_fee_currency": "USDT",
+        },
+        "leg_b": {
+            "exchange": "mexc",
+            "symbol": "BTC/USDT:USDT",
+            "side": "sell",
+            "price": 102.0,
+            "entry_fee": 0.05,
+            "entry_fee_currency": "USDT",
+        },
+    }
+    marks = {"BTC/USDT:USDT": 100.0}
+    pnl = estimate_net_exit_pnl(position, marks)
+    assert pnl["data_status"] == "complete"
+    assert pnl["gross_pnl_usdt"] == pytest.approx(2.0)
+    assert pnl["entry_fees_usdt"] == pytest.approx(0.10)
+    assert pnl["exit_fees_usdt"] == pytest.approx(0.07)
+    assert pnl["funding_usdt"] == pytest.approx(0.5)
+    assert pnl["net_pnl_usdt"] == pytest.approx(2.33)
+
+
+def test_estimate_net_exit_pnl_gross_profit_net_loss_gated():
+    position = {
+        "base_asset": "BTC",
+        "profile_id": "basis_convergence_fast",
+        "qty": 0.1,
+        "funding_usdt": 0.0,
+        "leg_a": {
+            "exchange": "okx",
+            "symbol": "BTC/USDT:USDT",
+            "side": "buy",
+            "price": 100.0,
+            "entry_fee": 0.04,
+            "entry_fee_currency": "USDT",
+        },
+        "leg_b": {
+            "exchange": "mexc",
+            "symbol": "BTC/USDT:USDT",
+            "side": "sell",
+            "price": 100.5,
+            "entry_fee": 0.04,
+            "entry_fee_currency": "USDT",
+        },
+    }
+    marks = {"BTC/USDT:USDT": 100.0}
+    pnl = estimate_net_exit_pnl(position, marks)
+    assert pnl["gross_pnl_usdt"] > 0
+    assert pnl["net_pnl_usdt"] < 0
+
+    allowed, note = decide_exit(
+        "basis_target_reached(current=0.0, target=0.001)",
+        pnl["net_pnl_usdt"],
+        {"min_profit_usdt": 0.0},
+    )
+    assert allowed is False
+    assert note.startswith("profit_pending")
+
+
+def test_estimate_net_exit_pnl_zero_fee_is_valid():
+    position = {
+        "base_asset": "BTC",
+        "profile_id": "basis_convergence_fast",
+        "qty": 0.1,
+        "leg_a": {
+            "exchange": "mexc",
+            "symbol": "BTC/USDT:USDT",
+            "side": "buy",
+            "price": 100.0,
+            "entry_fee": 0.0,
+            "entry_fee_currency": "USDT",
+        },
+        "leg_b": {
+            "exchange": "mexc",
+            "symbol": "BTC/USDT:USDT",
+            "side": "sell",
+            "price": 101.0,
+            "entry_fee": 0.0,
+            "entry_fee_currency": "USDT",
+        },
+    }
+    marks = {"BTC/USDT:USDT": 100.0}
+    pnl = estimate_net_exit_pnl(position, marks)
+    assert pnl["data_status"] == "complete"
+    assert pnl["entry_fees_usdt"] == 0.0
+
+
+def test_convert_fee_to_usdt_base_asset():
+    order = {"fee": {"cost": 0.001, "currency": "BTC"}, "price": 50000.0, "symbol": "BTC/USDT:USDT"}
+    assert order_fee_usdt(order) == pytest.approx(50.0)
+
+
+def test_emergency_hold_exceeded_triggers_risk_exit():
+    now_ms = 1_700_000_000_000
+    opened_ms = now_ms - (15 * 86_400_000)
+    pos = {
+        "base_asset": "BTC",
+        "opened_at_ms": opened_ms,
+        "leg_a": {"symbol": "BTC/USDT:USDT"},
+        "leg_b": {"symbol": "BTC/USDT:USDT"},
+    }
+    settings = {"target_hold_days": 7.0, "emergency_max_hold_days": 14.0}
+    reason, issue = _hold_exit(pos, now_ms, settings)
+    assert reason == "emergency_hold_exceeded"
+    assert issue is None
+
+    allowed, note = decide_exit(reason, -10.0, settings)
+    assert allowed is True
+    assert note == "risk_exit"
+

@@ -372,6 +372,17 @@ func (e *MatrixEvaluator) evaluateCandidateForProfile(
 		e.incRejection("insufficient_depth")
 		return domain.SignalPayload{}, false
 	}
+	longPrice, shortPrice := vwapA.VWAPPrice, vwapB.VWAPPrice
+	if cand.actionA == domain.ActionSellShort {
+		longPrice, shortPrice = vwapB.VWAPPrice, vwapA.VWAPPrice
+	}
+	directionalBasis := (shortPrice - longPrice) / longPrice
+
+	if prof.ID == "basis_convergence_fast" && directionalBasis <= 0 {
+		e.incRejection("negative_basis_spread")
+		return domain.SignalPayload{}, false
+	}
+
 	if prof.MaxInitialBasisSpread > 0 {
 		basisSpread := math.Abs(vwapA.VWAPPrice-vwapB.VWAPPrice) / vwapA.VWAPPrice
 		if basisSpread > prof.MaxInitialBasisSpread {
@@ -379,6 +390,7 @@ func (e *MatrixEvaluator) evaluateCandidateForProfile(
 			return domain.SignalPayload{}, false
 		}
 	}
+
 	metrics := ComputeMetrics(gross24h, cand.feeA, cand.feeB, vwapA.Slippage, vwapB.Slippage, prof.TargetHoldDays)
 	if metrics.BreakevenDays > prof.MaxBreakevenDays {
 		e.incRejection("high_breakeven")

@@ -72,10 +72,8 @@ def test_watchdog_fetches_live_basis_and_applies_exit_limits(short_mark, expecte
 
     exited = watchdog.check_exit_conditions([position], now_ms=now_ms + 1_000)
 
-    if expected_reason == "basis_adverse_stop":
-        assert expected_reason in exited[0]["reason"]
-    else:
-        assert exited == []
+    assert len(exited) == 1
+    assert expected_reason in exited[0]["reason"]
 
 
 def test_realized_pnl_falls_back_to_recorded_entry_and_exit_prices():

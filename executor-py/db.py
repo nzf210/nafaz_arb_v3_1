@@ -369,36 +369,56 @@ class PostgresStore:
         leg_b = legs.get("leg_b") or {}
         src_a = position.get("leg_a") or {}
         src_b = position.get("leg_b") or {}
+        base_params = (
+            str(position.get("base_asset", "unknown")),
+            str(position.get("profile_id", "")) or None,
+            float(position.get("qty", 0.0) or 0.0),
+            src_a.get("exchange"),
+            src_b.get("exchange"),
+            leg_a.get("entry_price"),
+            leg_b.get("entry_price"),
+            leg_a.get("exit_price"),
+            leg_b.get("exit_price"),
+            float(leg_a.get("qty", 0.0) or 0.0),
+            float(leg_b.get("qty", 0.0) or 0.0),
+            pnl.get("realized_pnl_usdt"),
+            pnl.get("fees_usdt"),
+            pnl.get("net_pnl_usdt"),
+            str(pnl.get("pnl_status") or "unavailable"),
+            close_reason,
+            int(position.get("opened_at_ms") or 0) or None,
+        )
+        extended_params = base_params + (
+            pnl.get("funding_usdt"),
+            pnl.get("entry_fees_usdt"),
+            pnl.get("exit_fees_usdt"),
+        )
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO closed_trades (
-                    base_asset, profile_id, qty, leg_a_exchange, leg_b_exchange,
-                    entry_price_a, entry_price_b, exit_price_a, exit_price_b,
-                    closed_qty_a, closed_qty_b, realized_pnl_usdt, fees_usdt, net_pnl_usdt,
-                    pnl_status, close_reason, opened_at_ms
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    str(position.get("base_asset", "unknown")),
-                    str(position.get("profile_id", "")) or None,
-                    float(position.get("qty", 0.0) or 0.0),
-                    src_a.get("exchange"),
-                    src_b.get("exchange"),
-                    leg_a.get("entry_price"),
-                    leg_b.get("entry_price"),
-                    leg_a.get("exit_price"),
-                    leg_b.get("exit_price"),
-                    float(leg_a.get("qty", 0.0) or 0.0),
-                    float(leg_b.get("qty", 0.0) or 0.0),
-                    pnl.get("realized_pnl_usdt"),
-                    pnl.get("fees_usdt"),
-                    pnl.get("net_pnl_usdt"),
-                    str(pnl.get("pnl_status") or "unavailable"),
-                    close_reason,
-                    int(position.get("opened_at_ms") or 0) or None,
-                ),
-            )
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO closed_trades (
+                        base_asset, profile_id, qty, leg_a_exchange, leg_b_exchange,
+                        entry_price_a, entry_price_b, exit_price_a, exit_price_b,
+                        closed_qty_a, closed_qty_b, realized_pnl_usdt, fees_usdt, net_pnl_usdt,
+                        pnl_status, close_reason, opened_at_ms, funding_usdt, entry_fees_usdt, exit_fees_usdt
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    extended_params,
+                )
+            except Exception:
+                cur.execute(
+                    """
+                    INSERT INTO closed_trades (
+                        base_asset, profile_id, qty, leg_a_exchange, leg_b_exchange,
+                        entry_price_a, entry_price_b, exit_price_a, exit_price_b,
+                        closed_qty_a, closed_qty_b, realized_pnl_usdt, fees_usdt, net_pnl_usdt,
+                        pnl_status, close_reason, opened_at_ms
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    base_params,
+                )
+
 
     def list_closed_trades(self, limit: int = 10) -> List[Dict[str, Any]]:
         conn = self._get_conn()

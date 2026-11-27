@@ -9,8 +9,9 @@ from exit_monitor import evaluate_position_exit, fetch_leg_marks
 from exit_policy import decide_exit
 from exit_rules import DEFAULT_PROFILE_EXIT_SETTINGS
 from notifier import TelegramNotifier
-from pnl import estimate_price_pnl
+from pnl import estimate_net_exit_pnl, estimate_price_pnl
 from reconcile import REDIS_POSITIONS_KEY, ReconcileMixin
+
 
 logger = logging.getLogger(__name__)
 
@@ -302,10 +303,15 @@ class RiskWatchdog(ReconcileMixin):
     ) -> tuple[Optional[str], List[str]]:
         return evaluate_position_exit(pos, now_ms, settings, self.exchanges)
 
-    def _estimate_exit_pnl(self, pos: Dict[str, Any]) -> Optional[float]:
-        # Gross mark PnL is not net-PnL and cannot authorize a profit exit.
-        # Only risk exits may proceed while fee/funding data is unavailable.
-        return None
+    def _estimate_exit_pnl(self, pos: Dict[str, Any], curr_ms: Optional[int] = None) -> Optional[float]:
+        marks, issue = fetch_leg_marks(pos, self.exchanges)
+        if issue or marks is None:
+            return None
+        est = estimate_net_exit_pnl(pos, marks, exchanges=self.exchanges, now_ms=curr_ms)
+        if est.get("data_status") == "unavailable":
+            return None
+        return est.get("net_pnl_usdt")
+
 
     def _confirm_funding_flip(
         self, pos: Dict[str, Any], settings: Dict[str, Any], curr_ms: int
@@ -382,13 +388,12 @@ class RiskWatchdog(ReconcileMixin):
             if not reason:
                 self._reset_funding_confirmation(pos)
                 continue
+            if not reason.startswith("funding_flipped"):
+                self._reset_funding_confirmation(pos)
             if reason.startswith("funding_flipped") and not self._confirm_funding_flip(pos, settings, curr_ms):
                 self._report_exit_blocked(pos, reason, "funding flip awaiting confirmation", curr_ms)
                 continue
-            if reason.startswith(("basis_target_reached", "basis_target_already_reached")):
-                pnl_estimate = None
-            else:
-                pnl_estimate = self._estimate_exit_pnl(pos)
+            pnl_estimate = self._estimate_exit_pnl(pos, curr_ms)
             allowed, note = decide_exit(reason, pnl_estimate, settings)
             if not allowed:
                 self._report_exit_blocked(pos, reason, note, curr_ms)

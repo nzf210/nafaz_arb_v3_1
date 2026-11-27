@@ -94,11 +94,16 @@ def _hold_exit(
     if opened_ms > 0 and max_hold_days > 0:
         try:
             hold_ms = int(max_hold_days * 86_400_000)
-        except OverflowError:
+            emergency_days = float(settings.get("emergency_max_hold_days", max(max_hold_days * 2.0, 14.0)))
+            emergency_ms = int(emergency_days * 86_400_000)
+        except (OverflowError, TypeError, ValueError):
             return None, INVALID_HOLD_SETTING
+        if now_ms - opened_ms >= emergency_ms:
+            return "emergency_hold_exceeded", None
         if now_ms - opened_ms >= hold_ms:
             return "target_hold_days_reached", None
     return None, None
+
 
 
 def _basis_exit(
