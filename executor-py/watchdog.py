@@ -62,6 +62,7 @@ class RiskWatchdog(ReconcileMixin):
         self._unwind_attempts: Dict[str, tuple[int, int]] = {}
         self._margin_status: Dict[str, str] = {}
         self._funding_flip_confirmations: Dict[str, tuple[int, int]] = {}
+        self._latest_pnl_estimates: Dict[str, Dict[str, Any]] = {}
 
     def _load_exit_profile_settings(self) -> Dict[str, Dict[str, Any]]:
         settings = {key: dict(value) for key, value in DEFAULT_PROFILE_EXIT_SETTINGS.items()}
@@ -308,6 +309,13 @@ class RiskWatchdog(ReconcileMixin):
         if issue or marks is None:
             return None
         est = estimate_net_exit_pnl(pos, marks, exchanges=self.exchanges, now_ms=curr_ms)
+        base_asset = str(pos.get("base_asset", ""))
+        if base_asset:
+            self._latest_pnl_estimates[base_asset] = {
+                "marks": marks,
+                "pnl": est,
+                "updated_at": curr_ms or int(time.time() * 1000),
+            }
         if est.get("data_status") == "unavailable":
             return None
         return est.get("net_pnl_usdt")

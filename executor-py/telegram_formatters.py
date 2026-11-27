@@ -156,6 +156,13 @@ def format_status(info: Dict[str, Any]) -> str:
     mode_tag = TEXT_SIMULASI if dry else TEXT_LIVE
     ks = "🛑 AKTIF (HALTED)" if info.get("kill_switch") else "🟢 NONAKTIF (NORMAL)"
     pos_count = info.get("open_positions_count", 0)
+    total_unrealized = info.get("total_unrealized_pnl_usdt")
+    if total_unrealized is not None:
+        icon = "🟢" if total_unrealized >= 0 else "🔴"
+        pos_line = f"• <b>Posisi Terbuka:</b> <code>{pos_count}</code> ({icon} <code>{total_unrealized:+.4f} {TEXT_USDT}</code>)\n"
+    else:
+        pos_line = f"• <b>Posisi Terbuka:</b> <code>{pos_count}</code>\n"
+
     cexs = info.get("cex_health", {})
     cex_lines = "\n".join(
         f"• <b>{c.upper()}</b>: <code>{status}</code>" for c, status in cexs.items()
@@ -165,7 +172,7 @@ def format_status(info: Dict[str, Any]) -> str:
         "⚡ <b>Status nafaz_arb v3.1</b>\n\n"
         f"• <b>Mode Trading:</b> <code>{mode_tag}</code>\n"
         f"• <b>Kill-Switch:</b> <b>{ks}</b>\n"
-        f"• <b>Posisi Terbuka:</b> <code>{pos_count}</code>\n"
+        f"{pos_line}"
         f"• <b>Canary Cap:</b> <code>${info.get('canary_cap', 0):.2f} {TEXT_USDT}</code>\n"
         f"• <b>Postgres DB:</b> <code>{'TERHUBUNG' if info.get('db_ok') else 'OFFLINE'}</code>\n"
         f"• <b>Alert Filter:</b> <code>{info.get('notif_summary', 'Normal')}</code>\n\n"
@@ -183,16 +190,59 @@ def _format_pos_item(i: int, pos: Dict[str, Any]) -> str:
     ex_b = html.escape(str(leg_b.get("exchange", ""))).upper()
     sym_a = html.escape(str(leg_a.get("symbol") or leg_a.get("raw_symbol", "")))
     sym_b = html.escape(str(leg_b.get("symbol") or leg_b.get("raw_symbol", "")))
-    pr_a = float(leg_a.get("price") or leg_a.get("vwap_price") or 0.0)
-    pr_b = float(leg_b.get("price") or leg_b.get("vwap_price") or 0.0)
-    act_a = html.escape(str(leg_a.get("action", "BUY"))).upper()
-    act_b = html.escape(str(leg_b.get("action", "SELL"))).upper()
+    pr_a = float(leg_a.get("entry_avg_price") or leg_a.get("price") or leg_a.get("vwap_price") or 0.0)
+    pr_b = float(leg_b.get("entry_avg_price") or leg_b.get("price") or leg_b.get("vwap_price") or 0.0)
+    act_a = html.escape(str(leg_a.get("action") or leg_a.get("side", "BUY"))).upper()
+    act_b = html.escape(str(leg_b.get("action") or leg_b.get("side", "SELL"))).upper()
+
+    marks = pos.get("marks") or {}
+    mark_a = marks.get("leg_a")
+    mark_b = marks.get("leg_b")
+    mark_a_str = f" (Mark: <code>{mark_a:.4f}</code>)" if mark_a is not None else ""
+    mark_b_str = f" (Mark: <code>{mark_b:.4f}</code>)" if mark_b is not None else ""
+
+    opened_at_ms = pos.get("opened_at_ms")
+    hold_str = ""
+    if opened_at_ms and opened_at_ms > 0:
+        elapsed_sec = max(0, int(time.time() - (opened_at_ms / 1000.0)))
+        days = elapsed_sec // 86400
+        hours = (elapsed_sec % 86400) // 3600
+        mins = (elapsed_sec % 3600) // 60
+        if days > 0:
+            hold_str = f"• Durasi: <code>{days}h {hours}j {mins}m</code>\n"
+        else:
+            hold_str = f"• Durasi: <code>{hours}j {mins}m</code>\n"
+
+    est = pos.get("pnl_estimate") or {}
+    pnl_lines = []
+    if est and est.get("net_pnl_usdt") is not None:
+        net_val = float(est["net_pnl_usdt"])
+        gross_val = float(est.get("gross_pnl_usdt") or 0.0)
+        fees_val = float(est.get("fees_usdt") or 0.0)
+        funding_val = float(est.get("funding_usdt") or 0.0)
+        status = est.get("data_status", "complete")
+
+        icon = "🟢" if net_val >= 0 else "🔴"
+        pnl_lines.append(
+            f"• <b>Estimasi Net PnL:</b> {icon} <b>{net_val:+.4f} {TEXT_USDT}</b> <i>({status})</i>\n"
+            f"  └ Gross: <code>{gross_val:+.4f}</code> | Fee: <code>{fees_val:.4f}</code> | Funding: <code>{funding_val:+.4f}</code>\n"
+        )
+    elif "net_pnl_usdt" in pos and pos["net_pnl_usdt"] is not None:
+        net_val = float(pos["net_pnl_usdt"])
+        icon = "🟢" if net_val >= 0 else "🔴"
+        pnl_lines.append(f"• <b>Estimasi Net PnL:</b> {icon} <b>{net_val:+.4f} {TEXT_USDT}</b>\n")
+    else:
+        pnl_lines.append(f"• <b>Estimasi Net PnL:</b> <i>Memuat harga...</i>\n")
+
+    pnl_block = "".join(pnl_lines)
 
     return (
         f"<b>[{i}] {asset}</b> ({pid})\n"
         f"• Kuantitas: <code>{qty:.6f} {asset}</code>\n"
-        f"• Kaki A: <b>{ex_a}</b> <code>{act_a}</code> {sym_a} @ {pr_a:.4f}\n"
-        f"• Kaki B: <b>{ex_b}</b> <code>{act_b}</code> {sym_b} @ {pr_b:.4f}\n"
+        f"{hold_str}"
+        f"• Kaki A: <b>{ex_a}</b> <code>{act_a}</code> {sym_a} @ {pr_a:.4f}{mark_a_str}\n"
+        f"• Kaki B: <b>{ex_b}</b> <code>{act_b}</code> {sym_b} @ {pr_b:.4f}{mark_b_str}\n"
+        f"{pnl_block}"
     )
 
 
@@ -203,8 +253,26 @@ def format_positions(positions: List[Dict[str, Any]]) -> str:
             "<i>Saat ini tidak ada posisi arbitrase yang terbuka (idle).</i>"
         )
     blocks = [_format_pos_item(i + 1, p) for i, p in enumerate(positions)]
+
+    total_net = 0.0
+    has_pnl = False
+    for p in positions:
+        est = p.get("pnl_estimate") or {}
+        if est.get("net_pnl_usdt") is not None:
+            total_net += float(est["net_pnl_usdt"])
+            has_pnl = True
+        elif "net_pnl_usdt" in p and p["net_pnl_usdt"] is not None:
+            total_net += float(p["net_pnl_usdt"])
+            has_pnl = True
+
+    header_extra = ""
+    if has_pnl:
+        icon = "🟢" if total_net >= 0 else "🔴"
+        header_extra = f"• <b>Total Floating Net:</b> {icon} <b>{total_net:+.4f} {TEXT_USDT}</b>\n\n"
+
     return (
-        f"💼 <b>Posisi Aktif Executor ({len(positions)} Posisi)</b>\n\n"
+        f"💼 <b>Posisi Aktif Executor ({len(positions)} Posisi)</b>\n"
+        f"{header_extra}"
         + SEPARATOR
         + SEPARATOR.join(blocks)
         + "\n<i>Tekan tombol di bawah untuk Tutup Paksa posisi tertentu.</i>"

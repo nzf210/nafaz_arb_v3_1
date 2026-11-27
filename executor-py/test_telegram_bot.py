@@ -223,3 +223,56 @@ def test_push_notifications(bot_setup):
     )
     assert any("POSISI SELESAI DITUTUP" in msg and "ETH" in msg for msg in bot.outbox)
     assert any("1.2500 USDT" in msg and "AUTO_EXIT" in msg for msg in bot.outbox)
+
+
+def test_format_positions_with_pnl():
+    pos = [
+        {
+            "base_asset": "BTC",
+            "profile_id": "funding_carry_core",
+            "qty": 0.5,
+            "opened_at_ms": 1_700_000_000_000,
+            "leg_a": {
+                "exchange": "okx",
+                "symbol": "BTC/USDT:USDT",
+                "side": "buy",
+                "entry_avg_price": 50000.0,
+            },
+            "leg_b": {
+                "exchange": "mexc",
+                "symbol": "BTC/USDT:USDT",
+                "side": "sell",
+                "entry_avg_price": 50100.0,
+            },
+            "marks": {"leg_a": 50050.0, "leg_b": 50060.0},
+            "pnl_estimate": {
+                "gross_pnl_usdt": 45.0,
+                "fees_usdt": 5.0,
+                "funding_usdt": 2.5,
+                "net_pnl_usdt": 42.5,
+                "data_status": "complete",
+            },
+        }
+    ]
+    txt = tf.format_positions(pos)
+    assert "Total Floating Net" in txt
+    assert "+42.5000 USDT" in txt
+    assert "Estimasi Net PnL" in txt
+    assert "Mark: <code>50050.0000</code>" in txt
+    assert "Gross: <code>+45.0000</code>" in txt
+
+
+def test_format_status_with_floating_pnl():
+    info = {
+        "dry_run": False,
+        "kill_switch": False,
+        "open_positions_count": 2,
+        "total_unrealized_pnl_usdt": 0.1234,
+        "canary_cap": 20.0,
+        "db_ok": True,
+        "cex_health": {"okx": "OK", "mexc": "OK"},
+        "notif_summary": "Normal",
+    }
+    txt = tf.format_status(info)
+    assert "Posisi Terbuka:" in txt
+    assert "+0.1234 USDT" in txt

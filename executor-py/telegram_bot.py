@@ -272,7 +272,7 @@ class TelegramBot:
             self.redis.set("core:kill_switch_reason", "")
 
     def get_system_status(self) -> Dict[str, Any]:
-        pos = self.get_active_positions()
+        pos = self.get_active_positions(include_pnl=True)
         cexs: Dict[str, str] = {}
         if self.redis:
             for name in ("okx", "bybit", "mexc"):
@@ -285,22 +285,65 @@ class TelegramBot:
                 db_ok = bool(self.db_store._get_conn())
             except Exception:
                 db_ok = False
+
+        total_floating_pnl: Optional[float] = None
+        valid_pnls = [
+            float(p["pnl_estimate"]["net_pnl_usdt"])
+            for p in pos
+            if p.get("pnl_estimate") and p["pnl_estimate"].get("net_pnl_usdt") is not None
+        ]
+        if valid_pnls:
+            total_floating_pnl = sum(valid_pnls)
+
         return {
             "dry_run": self.dry_run,
             "kill_switch": self.is_kill_switch_active(),
             "open_positions_count": len(pos),
+            "total_unrealized_pnl_usdt": total_floating_pnl,
             "canary_cap": self.canary_cap,
             "db_ok": db_ok,
             "cex_health": cexs,
             "notif_summary": "Dibisukan" if self._is_muted() else "Aktif",
         }
 
-    def get_active_positions(self) -> List[Dict[str, Any]]:
+    def get_active_positions(self, include_pnl: bool = True) -> List[Dict[str, Any]]:
         if self.watchdog:
-            return self.watchdog._load_positions()
-        if self.db_store:
-            return self.db_store.load_active_positions()
-        return []
+            positions = self.watchdog._load_positions()
+        elif self.db_store:
+            positions = self.db_store.load_active_positions()
+        else:
+            positions = []
+
+        if include_pnl and positions:
+            now_ms = int(time.time() * 1000)
+            exchanges = getattr(self.watchdog, "exchanges", None) or self.exchanges
+            for pos in positions:
+                asset = str(pos.get("base_asset", ""))
+                cached_dict = getattr(self.watchdog, "_latest_pnl_estimates", None)
+                cached = cached_dict.get(asset) if isinstance(cached_dict, dict) else None
+                updated_at = cached.get("updated_at") if isinstance(cached, dict) else None
+                if isinstance(updated_at, (int, float)) and (now_ms - updated_at < 15_000):
+                    pos["marks"] = cached.get("marks")
+                    pos["pnl_estimate"] = cached.get("pnl")
+                elif isinstance(exchanges, dict) and exchanges:
+                    try:
+                        from exit_monitor import fetch_leg_marks
+                        from pnl import estimate_net_exit_pnl
+
+                        marks, _ = fetch_leg_marks(pos, exchanges)
+                        if marks:
+                            pos["marks"] = marks
+                            est = estimate_net_exit_pnl(pos, marks, exchanges=exchanges, now_ms=now_ms)
+                            pos["pnl_estimate"] = est
+                            if self.watchdog and hasattr(self.watchdog, "_latest_pnl_estimates") and isinstance(self.watchdog._latest_pnl_estimates, dict):
+                                self.watchdog._latest_pnl_estimates[asset] = {
+                                    "marks": marks,
+                                    "pnl": est,
+                                    "updated_at": now_ms,
+                                }
+                    except Exception as exc:
+                        logger.debug("Failed enriching PnL for %s: %s", asset, exc)
+        return positions
 
     def get_live_balances(self) -> Dict[str, Dict[str, Any]]:
         res: Dict[str, Dict[str, Any]] = {}
