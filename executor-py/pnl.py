@@ -134,6 +134,14 @@ def order_fee_usdt(
     return total if found else None
 
 
+DEFAULT_TAKER_FEE_RATES = {
+    "okx": 0.0005,
+    "mexc": 0.0008,
+    "bybit": 0.00055,
+    "default": 0.0006,
+}
+
+
 def leg_closed_qty(position: Dict[str, Any], unwind: Dict[str, Any], suffix: str) -> float:
     qty = _positive(unwind.get(f"closed_qty_{suffix}"))
     if qty:
@@ -141,44 +149,93 @@ def leg_closed_qty(position: Dict[str, Any], unwind: Dict[str, Any], suffix: str
     return _positive(position.get("qty")) or 0.0
 
 
-def _leg_pnl(leg: Dict[str, Any], order: Optional[Dict[str, Any]], qty: float) -> tuple[Optional[float], float, float, Optional[float]]:
+def _leg_pnl(
+    leg: Dict[str, Any],
+    order: Optional[Dict[str, Any]],
+    qty: float,
+    fee_rates: Optional[Dict[str, float]] = None,
+    fallback_estimated_fees: bool = False,
+) -> tuple[Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], Optional[float]]:
+    rates = dict(DEFAULT_TAKER_FEE_RATES)
+    if fee_rates:
+        rates.update(fee_rates)
+    ex_name = str(leg.get("exchange", "")).lower()
+    taker_fee_rate = rates.get(ex_name, rates["default"])
+
     direction = resolve_direction(leg)
     entry = leg_entry_price(leg)
     exit_price = order_price(order)
+    order_status = str((order or {}).get("status") or "").lower()
+
+    if order_status == "already_flat":
+        return 0.0, entry, exit_price, 0.0, 0.0, 0.0
+
+    # 1. Resolve Exit Fee (exact from order, fallback to estimated taker fee if enabled)
     exit_fee = order_fee_usdt(order, fill_price=exit_price, symbol=leg.get("symbol"))
-    entry_fee = leg.get("entry_fee_usdt")
-    entry_fee_value = _non_negative(entry_fee)
-    if entry_fee_value is not None:
-        fee = exit_fee
-        if fee is not None:
-            fee += entry_fee_value
+    if exit_fee is None and fallback_estimated_fees and exit_price is not None and qty > QTY_EPSILON:
+        exit_fee = exit_price * qty * taker_fee_rate
+
+    # 2. Resolve Entry Fee (exact from leg, fallback to estimated taker fee if enabled)
+    entry_fee_value = _non_negative(leg.get("entry_fee_usdt"))
+    if entry_fee_value is None and "entry_fee" in leg:
+        entry_fee_value = _convert_fee_to_usdt(
+            _non_negative(leg.get("entry_fee")),
+            leg.get("entry_fee_currency"),
+            entry,
+            leg.get("symbol"),
+        )
+    if entry_fee_value is None and fallback_estimated_fees and entry is not None and qty > QTY_EPSILON:
+        entry_fee_value = entry * qty * taker_fee_rate
+
+    # Total fee for this leg
+    if entry_fee_value is not None and exit_fee is not None:
+        fee = entry_fee_value + exit_fee
+    elif fallback_estimated_fees and (entry_fee_value is not None or exit_fee is not None):
+        fee = (entry_fee_value or 0.0) + (exit_fee or 0.0)
     else:
         fee = None
+
     if direction is None or entry is None or exit_price is None or qty <= QTY_EPSILON:
-        return None, entry, exit_price, fee
-    return (exit_price - entry) * qty * direction, entry, exit_price, fee
+        return None, entry, exit_price, fee, entry_fee_value, exit_fee
+
+    return (exit_price - entry) * qty * direction, entry, exit_price, fee, entry_fee_value, exit_fee
 
 
 
-def compute_realized_pnl(position: Dict[str, Any], unwind: Dict[str, Any]) -> Dict[str, Any]:
+def compute_realized_pnl(
+    position: Dict[str, Any],
+    unwind: Dict[str, Any],
+    fee_rates: Optional[Dict[str, float]] = None,
+    fallback_estimated_fees: bool = False,
+) -> Dict[str, Any]:
     """
-    Compute gross realized price PnL (fees excluded) plus fee total from verified closes.
+    Compute gross realized price PnL plus fee total and net PnL from verified closes.
 
     Returns a summary dict; `realized_pnl_usdt` is None only when no leg produced a
     computable value, so closed trades never silently report an empty PnL.
     """
     funding_usdt, funding_data_available = resolve_funding_usdt(unwind)
-    legs, gross, priced_legs, fees, fee_data_available = resolve_leg_pnl(position, unwind)
+    legs, gross, priced_legs, fees, fee_data_available, entry_fees, exit_fees = resolve_leg_pnl(
+        position, unwind, fee_rates=fee_rates, fallback_estimated_fees=fallback_estimated_fees
+    )
     realized = gross if priced_legs else None
     net = compute_net_pnl(realized, fees, funding_usdt, fee_data_available, funding_data_available)
     pnl_status = determine_pnl_status(priced_legs, fee_data_available, funding_data_available)
+    fee_status = "complete" if fee_data_available else "unavailable"
+    if fee_data_available and fallback_estimated_fees:
+        # Check if any leg fee was estimated
+        if any(l.get("fee_usdt") is not None for l in legs.values()):
+            fee_status = "complete"
+
     return {
         "realized_pnl_usdt": realized,
         "fees_usdt": fees if fee_data_available else None,
+        "entry_fees_usdt": entry_fees if fee_data_available else None,
+        "exit_fees_usdt": exit_fees if fee_data_available else None,
         "funding_usdt": funding_usdt if funding_data_available else None,
         "net_pnl_usdt": net,
         "pnl_status": pnl_status,
-        "fee_status": "complete" if fee_data_available else "unavailable",
+        "fee_status": fee_status,
         "legs": legs,
     }
 
@@ -196,10 +253,15 @@ def resolve_funding_usdt(unwind: Dict[str, Any]) -> tuple[Optional[float], bool]
 
 
 def resolve_leg_pnl(
-    position: Dict[str, Any], unwind: Dict[str, Any]
-) -> tuple[Dict[str, Any], float, int, float, bool]:
+    position: Dict[str, Any],
+    unwind: Dict[str, Any],
+    fee_rates: Optional[Dict[str, float]] = None,
+    fallback_estimated_fees: bool = False,
+) -> tuple[Dict[str, Any], float, int, float, bool, float, float]:
     gross = 0.0
     fees = 0.0
+    entry_fees_total = 0.0
+    exit_fees_total = 0.0
     priced_legs = 0
     fee_data_available = True
     legs: Dict[str, Any] = {}
@@ -207,11 +269,15 @@ def resolve_leg_pnl(
         leg = position.get(leg_key) or {}
         order = unwind.get(order_key)
         qty = leg_closed_qty(position, unwind, suffix)
-        leg_pnl, entry, exit_price, fee = _leg_pnl(leg, order, qty)
+        leg_pnl, entry, exit_price, fee, entry_fee, exit_fee = _leg_pnl(
+            leg, order, qty, fee_rates=fee_rates, fallback_estimated_fees=fallback_estimated_fees
+        )
         if fee is None:
             fee_data_available = False
-        if fee is not None:
+        else:
             fees += fee
+            entry_fees_total += (entry_fee or 0.0)
+            exit_fees_total += (exit_fee or 0.0)
         if leg_pnl is not None:
             gross += leg_pnl
             priced_legs += 1
@@ -221,8 +287,20 @@ def resolve_leg_pnl(
             "exit_price": exit_price,
             "realized_pnl_usdt": leg_pnl,
             "fee_usdt": fee,
+            "entry_fee_usdt": entry_fee,
+            "exit_fee_usdt": exit_fee,
         }
-    return legs, gross, priced_legs, fees, fee_data_available
+
+    # Asymmetric quantity validation for delta-neutral arbitrage
+    qty_a = legs.get("leg_a", {}).get("qty", 0.0)
+    qty_b = legs.get("leg_b", {}).get("qty", 0.0)
+    if priced_legs == 2 and abs(qty_a - qty_b) > QTY_EPSILON:
+        logger.warning(
+            "Closed position legs had asymmetric quantities: leg_a=%.6f, leg_b=%.6f (drift=%.6f)",
+            qty_a, qty_b, abs(qty_a - qty_b)
+        )
+
+    return legs, gross, priced_legs, fees, fee_data_available, entry_fees_total, exit_fees_total
 
 
 def compute_net_pnl(
@@ -292,12 +370,21 @@ FUNDING_CACHE_TTL_MS = 300_000
 
 
 def get_real_leg_funding(
-    exchange_client: Any, ex_name: str, symbol: str, opened_at_ms: int, curr_ms: int
+    exchange_client: Any,
+    ex_name: str,
+    symbol: str,
+    opened_at_ms: int,
+    curr_ms: int,
+    closed_at_ms: Optional[int] = None,
 ) -> Optional[float]:
-    """Fetch real funding settlement total from exchange history, with in-memory caching."""
-    if not exchange_client or not hasattr(exchange_client, "fetch_funding_history"):
+    """
+    Fetch real funding settlement total from exchange history, with in-memory caching
+    and strict timestamp filtering to reject pre-trade history.
+    """
+    if not exchange_client or not hasattr(exchange_client, "fetch_funding_history") or opened_at_ms <= 0:
         return None
-    cache_key = f"{ex_name}:{symbol}:{opened_at_ms}"
+    end_ms = closed_at_ms or curr_ms
+    cache_key = f"{ex_name}:{symbol}:{opened_at_ms}:{end_ms // 60_000}"
     cached = _FUNDING_HISTORY_CACHE.get(cache_key)
     if cached is not None and (curr_ms - cached[1]) < FUNDING_CACHE_TTL_MS:
         return cached[0]
@@ -306,22 +393,110 @@ def get_real_leg_funding(
         history = exchange_client.fetch_funding_history(symbol, since=opened_at_ms)
         if isinstance(history, list):
             total = 0.0
+            found_any = False
             for item in history:
-                if isinstance(item, dict) and item.get("amount") is not None:
-                    total += float(item["amount"])
-            _FUNDING_HISTORY_CACHE[cache_key] = (total, curr_ms)
-            return total
+                if not isinstance(item, dict):
+                    continue
+                ts = item.get("timestamp")
+                # CRITICAL: Strict timestamp filtering because exchanges (e.g. MEXC) ignore the `since` argument
+                if ts is not None and (ts < opened_at_ms or (end_ms and ts > end_ms)):
+                    continue
+                amt = item.get("amount")
+                if amt is not None:
+                    try:
+                        parsed_amt = float(amt)
+                        if math.isfinite(parsed_amt):
+                            total += parsed_amt
+                            found_any = True
+                    except (TypeError, ValueError):
+                        continue
+            res = total if found_any else 0.0
+            _FUNDING_HISTORY_CACHE[cache_key] = (res, curr_ms)
+            return res
     except Exception as exc:
         logger.debug("fetch_funding_history failed for %s on %s: %s", symbol, ex_name, exc)
     return None
 
 
-DEFAULT_TAKER_FEE_RATES = {
-    "okx": 0.0005,
-    "mexc": 0.0008,
-    "bybit": 0.00055,
-    "default": 0.0006,
-}
+def calculate_position_funding(
+    position: Dict[str, Any],
+    exchanges: Optional[Dict[str, Any]] = None,
+    curr_ms: Optional[int] = None,
+    closed_at_ms: Optional[int] = None,
+) -> tuple[Optional[float], bool]:
+    """
+    Calculate verified funding cash flow for an open or closed delta-neutral position.
+    
+    Guarantees that historical settlements from before the trade's opened_at_ms
+    are strictly excluded.
+    """
+    opened_ms = int(position.get("opened_at_ms") or 0)
+    now_ms = curr_ms or int(time.time() * 1000)
+    end_ms = closed_at_ms or now_ms
+    elapsed_ms = max(0, end_ms - opened_ms) if opened_ms > 0 else 0
+    qty = _positive(position.get("qty")) or 0.0
+
+    funding_total = 0.0
+    all_available = True
+
+    for leg_key in ("leg_a", "leg_b"):
+        leg = position.get(leg_key) or {}
+        symbol = str(leg.get("symbol") or leg.get("canon_symbol") or leg.get("raw_symbol") or "")
+        if ":USDT" not in symbol:
+            continue
+        ex_name = str(leg.get("exchange", "")).lower()
+        direction = resolve_direction(leg)
+        leg_qty = _positive(leg.get("qty")) or qty
+
+        real_funding = None
+        if exchanges and ex_name in exchanges and opened_ms > 0:
+            client = exchanges[ex_name]
+            real_funding = get_real_leg_funding(
+                client, ex_name, symbol, opened_ms, now_ms, closed_at_ms=closed_at_ms
+            )
+
+        if real_funding is not None:
+            funding_total += real_funding
+        else:
+            try:
+                interval_hours = max(parse_interval_hours(leg.get("interval_hours"), 8), 1)
+            except (TypeError, ValueError, OverflowError):
+                interval_hours = 8
+
+            funding_rate = None
+            if leg.get("current_funding_rate") is not None:
+                try:
+                    funding_rate = float(leg["current_funding_rate"])
+                except (TypeError, ValueError):
+                    pass
+            if funding_rate is None and exchanges and ex_name in exchanges:
+                client = exchanges[ex_name]
+                if hasattr(client, "fetch_funding_rate"):
+                    try:
+                        fr_res = client.fetch_funding_rate(symbol)
+                        if isinstance(fr_res, dict):
+                            if fr_res.get("fundingRate") is not None:
+                                funding_rate = float(fr_res["fundingRate"])
+                            live_int = fr_res.get("interval") or fr_res.get("intervalHours")
+                            if live_int:
+                                interval_hours = max(parse_interval_hours(live_int, interval_hours), 1)
+                    except Exception as exc:
+                        logger.debug("Failed to fetch funding rate for %s: %s", symbol, exc)
+
+            settlement_ms = interval_hours * 3600_000
+            settlements = int(elapsed_ms // settlement_ms)
+            if settlements == 0:
+                leg_funding = 0.0
+            elif funding_rate is not None and direction is not None:
+                ref_price = leg_entry_price(leg) or 1.0
+                cash_dir = -1.0 if direction == 1.0 else 1.0
+                leg_funding = ref_price * leg_qty * funding_rate * cash_dir * max(settlements, 0)
+            else:
+                leg_funding = 0.0
+                all_available = False
+            funding_total += leg_funding
+
+    return funding_total, all_available
 
 
 def estimate_net_exit_pnl(

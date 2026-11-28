@@ -169,12 +169,14 @@ class UnwindMixin:
         return result
 
     def _store_pnl(self, position: Dict[str, Any], result: Dict[str, Any]) -> None:
-        pnl = compute_realized_pnl(position, result)
+        pnl = compute_realized_pnl(position, result, fallback_estimated_fees=True)
         result.update(
             {
                 "realized_pnl_usdt": pnl["realized_pnl_usdt"],
                 "realized_pnl_net_usdt": pnl["net_pnl_usdt"],
                 "fees_usdt": pnl["fees_usdt"],
+                "entry_fees_usdt": pnl.get("entry_fees_usdt"),
+                "exit_fees_usdt": pnl.get("exit_fees_usdt"),
                 "pnl_status": pnl["pnl_status"],
                 "fee_status": pnl["fee_status"],
                 "pnl_legs": pnl["legs"],

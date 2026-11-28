@@ -160,19 +160,25 @@ class ReconcileMixin:
         self, position: Dict[str, Any], unwind_result: Dict[str, Any], close_reason: str
     ) -> bool:
         """Persist realized PnL, close the position row, and notify Telegram."""
-        if "funding_usdt" not in unwind_result:
-            base_asset = str(position.get("base_asset", "UNKNOWN"))
-            latest = getattr(self, "_latest_pnl_estimates", {}).get(base_asset, {})
-            pnl_est = latest.get("pnl") if isinstance(latest, dict) else None
-            if isinstance(pnl_est, dict) and pnl_est.get("funding_usdt") is not None:
-                unwind_result["funding_usdt"] = pnl_est["funding_usdt"]
+        now_ms = int(time.time() * 1000)
+        if "funding_usdt" not in unwind_result or unwind_result.get("funding_usdt") is None:
+            from pnl import calculate_position_funding
 
-        pnl = compute_realized_pnl(position, unwind_result)
+            funding_val, _ = calculate_position_funding(
+                position, exchanges=getattr(self, "exchanges", None), curr_ms=now_ms, closed_at_ms=now_ms
+            )
+            if funding_val is not None:
+                unwind_result["funding_usdt"] = funding_val
+
+        pnl = compute_realized_pnl(position, unwind_result, fallback_estimated_fees=True)
         unwind_result.update(
             {
                 "realized_pnl_usdt": pnl["realized_pnl_usdt"],
                 "realized_pnl_net_usdt": pnl["net_pnl_usdt"],
                 "fees_usdt": pnl["fees_usdt"],
+                "entry_fees_usdt": pnl.get("entry_fees_usdt"),
+                "exit_fees_usdt": pnl.get("exit_fees_usdt"),
+                "funding_usdt": pnl.get("funding_usdt"),
                 "pnl_status": pnl["pnl_status"],
                 "fee_status": pnl["fee_status"],
                 "pnl_legs": pnl["legs"],
@@ -180,7 +186,8 @@ class ReconcileMixin:
             }
         )
         base_asset = position.get("base_asset", "UNKNOWN")
-        self.mark_position_closed(base_asset, pnl["realized_pnl_usdt"], close_reason)
+        recorded_pnl = pnl["net_pnl_usdt"] if pnl["net_pnl_usdt"] is not None else pnl["realized_pnl_usdt"]
+        self.mark_position_closed(base_asset, recorded_pnl, close_reason)
         if self.db_store is not None and hasattr(self.db_store, "record_closed_trade"):
             try:
                 self.db_store.record_closed_trade(position, unwind_result, pnl, close_reason)

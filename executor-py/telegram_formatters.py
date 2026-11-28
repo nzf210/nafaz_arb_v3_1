@@ -299,13 +299,19 @@ def format_balance(exchanges_data: Dict[str, Dict[str, Any]], dry_run: bool) -> 
 
 def _format_pnl_value(trade: Dict[str, Any]) -> str:
     pnl = trade.get("realized_pnl_usdt")
-    if pnl is None:
-        return "<i>PnL tidak tersedia</i>"
     fees = float(trade.get("fees_usdt") or 0.0)
     net = trade.get("net_pnl_usdt")
-    net_txt = f"{float(net):+.4f}" if net is not None else "n/a"
-    fee_txt = f" | fee <code>{fees:.4f}</code>" if fees else ""
-    return f"PnL <b>{float(pnl):+.4f} {TEXT_USDT}</b> (net {net_txt}){fee_txt}"
+    if pnl is None and net is None:
+        return "<i>PnL tidak tersedia</i>"
+    effective_net = float(net) if net is not None else (float(pnl) - fees if pnl is not None else 0.0)
+    icon = "🟢" if effective_net >= 0 else "🔴"
+    net_str = f"Net <b>{icon} {effective_net:+.4f} {TEXT_USDT}</b>"
+    gross_str = f"Gross: <code>{float(pnl):+.4f}</code>" if pnl is not None else ""
+    fee_str = f"Fee: <code>{fees:.4f}</code>" if fees > 0 else ""
+    details = " | ".join(s for s in (gross_str, fee_str) if s)
+    if details:
+        return f"{net_str} ({details})"
+    return net_str
 
 
 def format_history(trades: List[Dict[str, Any]], summary: Optional[Dict[str, Any]] = None) -> str:
@@ -537,18 +543,22 @@ def format_position_opened_alert(signal: Dict[str, Any], result: Dict[str, Any])
 def format_position_closed_alert(unwind_result: Dict[str, Any], base_asset: str) -> str:
     status = unwind_result.get("status", "UNWOUND")
     asset = html.escape(base_asset).upper()
-    pnl = unwind_result.get("realized_pnl_usdt")
+    gross = unwind_result.get("realized_pnl_usdt")
     net_pnl = unwind_result.get("realized_pnl_net_usdt")
     fees = unwind_result.get("fees_usdt")
+    funding = unwind_result.get("funding_usdt")
     pnl_lines = []
-    if pnl is not None:
-        pnl_lines.append(f"• PnL harga (gross): <b>{float(pnl):+.4f} USDT</b>")
-    else:
-        pnl_lines.append("• PnL harga: tidak tersedia")
     if net_pnl is not None:
-        pnl_lines.append(f"• Net PnL (setelah biaya): <b>{float(net_pnl):+.4f} USDT</b>")
+        icon = "🟢" if float(net_pnl) >= 0 else "🔴"
+        pnl_lines.append(f"• <b>Net PnL Bersih:</b> {icon} <b>{float(net_pnl):+.4f} USDT</b>")
+    if gross is not None:
+        pnl_lines.append(f"  └ PnL Harga (gross): <code>{float(gross):+.4f} USDT</code>")
     if fees is not None:
-        pnl_lines.append(f"• Total Fee: <b>{float(fees):.4f} USDT</b>")
+        pnl_lines.append(f"  └ Total Fee Bursa: <code>{float(fees):.4f} USDT</code>")
+    if funding is not None:
+        pnl_lines.append(f"  └ Settlement Funding: <code>{float(funding):+.4f} USDT</code>")
+    if not pnl_lines:
+        pnl_lines.append("• PnL: <i>tidak tersedia</i>")
     pnl_block = "\n".join(pnl_lines) + "\n"
     close_reason = html.escape(str(unwind_result.get("close_reason") or ""))
     return (

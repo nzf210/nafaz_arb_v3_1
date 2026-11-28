@@ -530,24 +530,27 @@ class PostgresStore:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT COUNT(*), COUNT(realized_pnl_usdt),
-                       COALESCE(SUM(realized_pnl_usdt), 0),                        COALESCE(SUM(fees_usdt), 0),
-                       COALESCE(SUM(CASE WHEN realized_pnl_usdt > 0 THEN 1 ELSE 0 END), 0),
-                       COALESCE(SUM(CASE WHEN realized_pnl_usdt < 0 THEN 1 ELSE 0 END), 0),
+                SELECT COUNT(*),
+                       COUNT(COALESCE(net_pnl_usdt, realized_pnl_usdt)),
+                       COALESCE(SUM(realized_pnl_usdt), 0),
+                       COALESCE(SUM(fees_usdt), 0),
+                       COALESCE(SUM(COALESCE(net_pnl_usdt, realized_pnl_usdt - COALESCE(fees_usdt, 0))), 0),
+                       COALESCE(SUM(CASE WHEN COALESCE(net_pnl_usdt, realized_pnl_usdt - COALESCE(fees_usdt, 0)) > 0 THEN 1 ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN COALESCE(net_pnl_usdt, realized_pnl_usdt - COALESCE(fees_usdt, 0)) < 0 THEN 1 ELSE 0 END), 0),
                        COALESCE(SUM(CASE WHEN closed_at >= NOW() - INTERVAL '24 hours'
-                                         THEN realized_pnl_usdt ELSE 0 END), 0)
+                                         THEN COALESCE(net_pnl_usdt, realized_pnl_usdt - COALESCE(fees_usdt, 0)) ELSE 0 END), 0)
                 FROM closed_trades
                 """
             )
-            row = cur.fetchone() or (0, 0, 0.0, 0.0, 0, 0, 0.0)
-        count, priced, gross, fees, wins, losses, pnl_24h = row
+            row = cur.fetchone() or (0, 0, 0.0, 0.0, 0.0, 0, 0, 0.0)
+        count, priced, gross, fees, net, wins, losses, pnl_24h = row
         return {
             "trades": int(count),
             "priced_trades": int(priced),
             "unpriced_trades": int(count) - int(priced),
             "realized_pnl_usdt": float(gross),
             "fees_usdt": float(fees),
-            "net_pnl_usdt": float(gross) - float(fees),
+            "net_pnl_usdt": float(net),
             "wins": int(wins),
             "losses": int(losses),
             "pnl_24h_usdt": float(pnl_24h),
